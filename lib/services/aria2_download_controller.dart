@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_aria2/flutter_aria2.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../models/add_download_request.dart';
 import '../models/download_task.dart';
@@ -51,6 +53,8 @@ class Aria2DownloadController extends ChangeNotifier {
   Timer? _refreshTimer;
   StreamSubscription<Aria2DownloadEventData>? _eventSub;
   String? _caCertificatePath;
+  String? _sessionFilePath;
+  String? _taskStoreFilePath;
   bool _started = false;
   bool _isDisposed = false;
 
@@ -77,6 +81,8 @@ class Aria2DownloadController extends ChangeNotifier {
         caCertificatePath = await _ensureCaCertificatePath();
       }
 
+      await _ensurePersistencePaths();
+
       final defaultDir =
           '${Directory.systemTemp.path}${Platform.pathSeparator}flutter_aria2_downloads';
       final dir = Directory(defaultDir);
@@ -84,28 +90,43 @@ class Aria2DownloadController extends ChangeNotifier {
         dir.createSync(recursive: true);
       }
 
-      await _aria2.sessionNew(
-        options: {
-          'dir': defaultDir,
-          if (needCustomCa && caCertificatePath != null)
-            'ca-certificate': caCertificatePath,
-          if (needCustomCa) 'check-certificate': 'true',
-          'allow-overwrite': 'true',
-          'auto-file-renaming': 'true',
-          'continue': 'true',
-          'max-connection-per-server': '16',
-          'split': '16',
-          'min-split-size': '1M',
-          'max-concurrent-downloads': '5',
-          'max-tries': '1',
-          'retry-wait': '0',
-          'bt-tracker': kBtTrackers.join(','),
-          'enable-dht': 'true',
-          'enable-peer-exchange': 'true',
-          'seed-time': '0',
-        },
-        keepRunning: true,
-      );
+      final options = <String, String>{
+        'dir': defaultDir,
+        if (needCustomCa && caCertificatePath != null)
+          'ca-certificate': caCertificatePath,
+        if (needCustomCa) 'check-certificate': 'true',
+        'allow-overwrite': 'true',
+        'auto-file-renaming': 'true',
+        'continue': 'true',
+        'max-connection-per-server': '16',
+        'split': '16',
+        'min-split-size': '1M',
+        'max-concurrent-downloads': '5',
+        'max-tries': '1',
+        'retry-wait': '0',
+        'save-session-interval': '2',
+        'bt-tracker': kBtTrackers.join(','),
+        'enable-dht': 'true',
+        'enable-peer-exchange': 'true',
+        'seed-time': '0',
+      };
+
+      final sessionFilePath = _sessionFilePath;
+      if (sessionFilePath != null) {
+        options['input-file'] = sessionFilePath;
+        options['save-session'] = sessionFilePath;
+      }
+
+      try {
+        await _aria2.sessionNew(options: options, keepRunning: true);
+      } catch (error) {
+        final fallbackOptions = <String, String>{...options}
+          ..remove('input-file')
+          ..remove('save-session')
+          ..remove('save-session-interval');
+        onInfo?.call('会话持久化参数不可用，已使用兼容模式启动');
+        await _aria2.sessionNew(options: fallbackOptions, keepRunning: true);
+      }
 
       _eventSub = _aria2.onDownloadEvent.listen(_onDownloadEvent);
       await _aria2.startRunLoop();
@@ -113,6 +134,9 @@ class Aria2DownloadController extends ChangeNotifier {
         const Duration(seconds: 1),
         (_) => _refreshStatus(),
       );
+      await _restorePersistedTasks();
+      await _recoverInterruptedTasksOnStartup();
+      await _refreshStatus();
 
       isReady = true;
       onInfo?.call('aria2 会话已启动');
@@ -127,6 +151,8 @@ class Aria2DownloadController extends ChangeNotifier {
   }
 
   Future<void> close() async {
+    await _persistTasks();
+
     _refreshTimer?.cancel();
     _refreshTimer = null;
 
@@ -172,16 +198,19 @@ class Aria2DownloadController extends ChangeNotifier {
 
     try {
       if (request.isTorrent) {
-        final gid = await _aria2.addTorrent(
+        final stableTorrentPath = await _ensureStableTorrentFile(
           request.torrentPath!,
-          options: {'dir': saveDir},
+        );
+        final gid = await _addTorrentWithFallback(
+          torrentPath: stableTorrentPath,
+          saveDir: saveDir,
         );
         final name = request.torrentName ?? 'Torrent 任务';
         _tasks.add(
           DownloadTask(
             gid: gid,
             displayName: '[Torrent] $name',
-            torrentPath: request.torrentPath,
+            torrentPath: stableTorrentPath,
             saveDir: saveDir,
           ),
         );
@@ -192,7 +221,15 @@ class Aria2DownloadController extends ChangeNotifier {
           return;
         }
 
-        final gid = await _aria2.addUri([url], options: {'dir': saveDir});
+        final gid = await _aria2.addUri(
+          [url],
+          options: {
+            'dir': saveDir,
+            'continue': 'true',
+            'allow-overwrite': 'true',
+            'auto-file-renaming': 'true',
+          },
+        );
         _tasks.add(
           DownloadTask(
             gid: gid,
@@ -203,6 +240,7 @@ class Aria2DownloadController extends ChangeNotifier {
         );
       }
 
+      await _persistTasks();
       _notifySafely();
     } catch (error) {
       onError?.call('添加下载失败: $error');
@@ -230,6 +268,7 @@ class Aria2DownloadController extends ChangeNotifier {
       await _aria2.removeDownload(task.gid, force: true);
       _tasks.remove(task);
       _notifiedCompleteGids.remove(task.gid);
+      await _persistTasks();
       _notifySafely();
     } catch (error) {
       onError?.call('移除失败: $error');
@@ -238,22 +277,40 @@ class Aria2DownloadController extends ChangeNotifier {
 
   Future<void> retryTask(DownloadTask task) async {
     try {
+      try {
+        await _aria2.removeDownload(task.gid, force: true);
+      } catch (_) {}
+
       DownloadTask? newTask;
       if (task.torrentPath != null && task.torrentPath!.isNotEmpty) {
-        final gid = await _aria2.addTorrent(
+        final sourceFile = File(task.torrentPath!);
+        if (!sourceFile.existsSync()) {
+          onError?.call('种子文件不存在，请重新选择种子文件');
+          return;
+        }
+
+        final stableTorrentPath = await _ensureStableTorrentFile(
           task.torrentPath!,
-          options: {'dir': task.saveDir},
+        );
+        final gid = await _addTorrentWithFallback(
+          torrentPath: stableTorrentPath,
+          saveDir: task.saveDir,
         );
         newTask = DownloadTask(
           gid: gid,
           displayName: task.displayName,
-          torrentPath: task.torrentPath,
+          torrentPath: stableTorrentPath,
           saveDir: task.saveDir,
         );
       } else if (task.originalUri != null && task.originalUri!.isNotEmpty) {
         final gid = await _aria2.addUri(
           [task.originalUri!],
-          options: {'dir': task.saveDir},
+          options: {
+            'dir': task.saveDir,
+            'continue': 'true',
+            'allow-overwrite': 'true',
+            'auto-file-renaming': 'true',
+          },
         );
         newTask = DownloadTask(
           gid: gid,
@@ -268,16 +325,18 @@ class Aria2DownloadController extends ChangeNotifier {
         return;
       }
 
-      try {
-        await _aria2.removeDownload(task.gid, force: true);
-      } catch (_) {}
-
       _tasks.remove(task);
       _tasks.add(newTask);
       _notifiedCompleteGids.remove(task.gid);
+      await _persistTasks();
       _notifySafely();
     } catch (error) {
-      onError?.call('重试失败: $error');
+      if (_isErrorCode12(error)) {
+        final hint = await _buildCode12Hint(task.saveDir);
+        onError?.call('重试失败（错误码12）：$hint。若目录中有同名任务，请先移除旧任务');
+      } else {
+        onError?.call('重试失败: $error');
+      }
     }
   }
 
@@ -294,16 +353,49 @@ class Aria2DownloadController extends ChangeNotifier {
   Future<void> _refreshTask(DownloadTask task) async {
     try {
       final info = await _aria2.getDownloadInfo(task.gid);
+      final previousStatus = task.status;
       task.updateFrom(info);
 
       if (task.status == Aria2DownloadStatus.complete &&
           !_notifiedCompleteGids.contains(task.gid)) {
         _notifiedCompleteGids.add(task.gid);
         onDownloadCompleted?.call('下载完成: ${task.displayName}');
+        unawaited(_persistTasks());
+      }
+
+      if (task.status != previousStatus) {
+        unawaited(_persistTasks());
       }
 
       _notifySafely();
     } catch (_) {}
+  }
+
+  Future<void> _recoverInterruptedTasksOnStartup() async {
+    final candidates = _tasks
+        .where(
+          (task) =>
+              task.status != Aria2DownloadStatus.complete &&
+              task.status != Aria2DownloadStatus.removed,
+        )
+        .toList();
+
+    for (final task in candidates) {
+      try {
+        final info = await _aria2.getDownloadInfo(task.gid);
+        task.updateFrom(info);
+      } catch (error) {
+        task.status = Aria2DownloadStatus.error;
+        task.errorCode = _isErrorCode12(error) ? 12 : task.errorCode;
+        if (_isErrorCode12(error)) {
+          final hint = await _buildCode12Hint(task.saveDir);
+          onError?.call('任务恢复失败（错误码12）：$hint');
+        }
+      }
+    }
+
+    await _persistTasks();
+    _notifySafely();
   }
 
   void _onDownloadEvent(Aria2DownloadEventData event) {
@@ -329,6 +421,161 @@ class Aria2DownloadController extends ChangeNotifier {
       }
     }
     return null;
+  }
+
+  Future<void> _ensurePersistencePaths() async {
+    if (_sessionFilePath != null && _taskStoreFilePath != null) {
+      return;
+    }
+
+    final appSupportDir = await getApplicationSupportDirectory();
+    if (!appSupportDir.existsSync()) {
+      appSupportDir.createSync(recursive: true);
+    }
+
+    _sessionFilePath =
+        '${appSupportDir.path}${Platform.pathSeparator}aria2.session';
+    _taskStoreFilePath =
+        '${appSupportDir.path}${Platform.pathSeparator}tasks.json';
+
+    final sessionFilePath = _sessionFilePath;
+    if (sessionFilePath != null) {
+      final sessionFile = File(sessionFilePath);
+      if (!sessionFile.existsSync()) {
+        sessionFile.createSync(recursive: true);
+      }
+    }
+  }
+
+  Future<String> _ensureStableTorrentFile(String sourcePath) async {
+    await _ensurePersistencePaths();
+
+    final sourceFile = File(sourcePath);
+    if (!sourceFile.existsSync()) {
+      throw Exception('种子文件不存在: $sourcePath');
+    }
+
+    final appSupportDir = await getApplicationSupportDirectory();
+    final torrentsDir = Directory(
+      '${appSupportDir.path}${Platform.pathSeparator}torrents',
+    );
+    if (!torrentsDir.existsSync()) {
+      torrentsDir.createSync(recursive: true);
+    }
+
+    final safeName = sourceFile.uri.pathSegments.isNotEmpty
+        ? sourceFile.uri.pathSegments.last
+        : 'task.torrent';
+    final targetPath =
+        '${torrentsDir.path}${Platform.pathSeparator}${DateTime.now().millisecondsSinceEpoch}_$safeName';
+    await sourceFile.copy(targetPath);
+    return targetPath;
+  }
+
+  Future<String> _addTorrentWithFallback({
+    required String torrentPath,
+    required String saveDir,
+    bool strictResume = false,
+  }) async {
+    final btOptions = <String, String>{
+      'dir': saveDir,
+      'bt-tracker': kBtTrackers.join(','),
+      'enable-dht': 'true',
+      'enable-peer-exchange': 'true',
+      'follow-torrent': 'true',
+      'continue': 'true',
+      'allow-overwrite': 'true',
+      'auto-file-renaming': strictResume ? 'false' : 'true',
+    };
+
+    try {
+      return await _aria2.addTorrent(torrentPath, options: btOptions);
+    } catch (_) {
+      final gid = await _aria2.addTorrent(torrentPath);
+      await _aria2.changeOption(gid, btOptions);
+      return gid;
+    }
+  }
+
+  bool _isErrorCode12(Object error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('error code12') ||
+        message.contains('error code 12') ||
+        message.contains('errorcode=12') ||
+        message.contains('errorcode: 12') ||
+        message.contains('error code: 12');
+  }
+
+  Future<String> _buildCode12Hint(String saveDir) async {
+    try {
+      final dir = Directory(saveDir);
+      if (!dir.existsSync()) {
+        return '请删除损坏的下载文件和 .aria2 文件后重试';
+      }
+
+      final hasAria2Partial = dir
+          .listSync(followLinks: false)
+          .any((entity) => entity.path.toLowerCase().endsWith('.aria2'));
+      if (hasAria2Partial) {
+        return '检测到目录中存在 .aria2 断点文件，请删除对应损坏文件和 .aria2 后重试';
+      }
+    } catch (_) {}
+
+    return '请删除损坏的下载文件和 .aria2 文件后重试';
+  }
+
+  Future<void> _restorePersistedTasks() async {
+    try {
+      await _ensurePersistencePaths();
+      final taskStorePath = _taskStoreFilePath;
+      if (taskStorePath == null) return;
+
+      final file = File(taskStorePath);
+      if (!file.existsSync()) return;
+
+      final content = await file.readAsString();
+      if (content.trim().isEmpty) return;
+
+      final decoded = jsonDecode(content);
+      if (decoded is! List) return;
+
+      _tasks
+        ..clear()
+        ..addAll(
+          decoded.whereType<Map>().map(
+            (e) => DownloadTask.fromMap(Map<String, dynamic>.from(e)),
+          ),
+        );
+      _tasks.removeWhere(
+        (task) => task.gid.isEmpty || task.displayName.isEmpty,
+      );
+
+      _notifiedCompleteGids
+        ..clear()
+        ..addAll(
+          _tasks
+              .where((task) => task.status == Aria2DownloadStatus.complete)
+              .map((task) => task.gid),
+        );
+
+      _notifySafely();
+    } catch (_) {}
+  }
+
+  Future<void> _persistTasks() async {
+    try {
+      await _ensurePersistencePaths();
+      final taskStorePath = _taskStoreFilePath;
+      if (taskStorePath == null) return;
+
+      final file = File(taskStorePath);
+      if (!file.parent.existsSync()) {
+        file.parent.createSync(recursive: true);
+      }
+
+      final jsonList = _tasks.map((task) => task.toMap()).toList();
+      await file.writeAsString(jsonEncode(jsonList), flush: true);
+    } catch (_) {}
   }
 
   void _notifySafely() {

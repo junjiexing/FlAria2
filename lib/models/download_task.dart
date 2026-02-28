@@ -30,6 +30,44 @@ class DownloadTask {
   bool get isError => status == Aria2DownloadStatus.error;
   bool get isComplete => status == Aria2DownloadStatus.complete;
 
+  Map<String, dynamic> toMap() {
+    return {
+      'gid': gid,
+      'displayName': displayName,
+      'originalUri': originalUri,
+      'torrentPath': torrentPath,
+      'saveDir': saveDir,
+      'status': status.name,
+      'totalLength': totalLength,
+      'completedLength': completedLength,
+      'downloadSpeed': downloadSpeed,
+      'connections': connections,
+      'errorCode': errorCode,
+    };
+  }
+
+  factory DownloadTask.fromMap(Map<String, dynamic> map) {
+    final task = DownloadTask(
+      gid: (map['gid'] as String?) ?? '',
+      displayName: (map['displayName'] as String?) ?? '',
+      originalUri: map['originalUri'] as String?,
+      torrentPath: map['torrentPath'] as String?,
+      saveDir: (map['saveDir'] as String?) ?? '',
+    );
+
+    final statusName = map['status'] as String?;
+    task.status = Aria2DownloadStatus.values.firstWhere(
+      (s) => s.name == statusName,
+      orElse: () => Aria2DownloadStatus.waiting,
+    );
+    task.totalLength = (map['totalLength'] as int?) ?? 0;
+    task.completedLength = (map['completedLength'] as int?) ?? 0;
+    task.downloadSpeed = (map['downloadSpeed'] as int?) ?? 0;
+    task.connections = (map['connections'] as int?) ?? 0;
+    task.errorCode = (map['errorCode'] as int?) ?? 0;
+    return task;
+  }
+
   void updateFrom(Aria2DownloadInfo info) {
     status = info.status;
     totalLength = info.totalLength;
