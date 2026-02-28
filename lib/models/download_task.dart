@@ -6,6 +6,7 @@ class DownloadTask {
     required this.displayName,
     this.originalUri,
     this.torrentPath,
+    this.selectedTorrentFileIndexes,
     required this.saveDir,
   });
 
@@ -13,6 +14,7 @@ class DownloadTask {
   final String displayName;
   final String? originalUri;
   final String? torrentPath;
+  final List<int>? selectedTorrentFileIndexes;
   final String saveDir;
 
   Aria2DownloadStatus status = Aria2DownloadStatus.waiting;
@@ -36,6 +38,7 @@ class DownloadTask {
       'displayName': displayName,
       'originalUri': originalUri,
       'torrentPath': torrentPath,
+      'selectedTorrentFileIndexes': selectedTorrentFileIndexes,
       'saveDir': saveDir,
       'status': status.name,
       'totalLength': totalLength,
@@ -52,6 +55,9 @@ class DownloadTask {
       displayName: (map['displayName'] as String?) ?? '',
       originalUri: map['originalUri'] as String?,
       torrentPath: map['torrentPath'] as String?,
+      selectedTorrentFileIndexes: (map['selectedTorrentFileIndexes'] as List?)
+          ?.whereType<int>()
+          .toList(),
       saveDir: (map['saveDir'] as String?) ?? '',
     );
 

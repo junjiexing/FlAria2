@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/add_download_request.dart';
 import '../models/download_task.dart';
+import '../models/torrent_task_file.dart';
 
 const kBtTrackers = [
   'udp://tracker.opentrackr.org:1337/announce',
@@ -204,6 +205,7 @@ class Aria2DownloadController extends ChangeNotifier {
         final gid = await _addTorrentWithFallback(
           torrentPath: stableTorrentPath,
           saveDir: saveDir,
+          selectedFileIndexes: request.selectedTorrentFileIndexes,
         );
         final name = request.torrentName ?? 'Torrent 任务';
         _tasks.add(
@@ -211,6 +213,7 @@ class Aria2DownloadController extends ChangeNotifier {
             gid: gid,
             displayName: '[Torrent] $name',
             torrentPath: stableTorrentPath,
+            selectedTorrentFileIndexes: request.selectedTorrentFileIndexes,
             saveDir: saveDir,
           ),
         );
@@ -295,11 +298,13 @@ class Aria2DownloadController extends ChangeNotifier {
         final gid = await _addTorrentWithFallback(
           torrentPath: stableTorrentPath,
           saveDir: task.saveDir,
+          selectedFileIndexes: task.selectedTorrentFileIndexes,
         );
         newTask = DownloadTask(
           gid: gid,
           displayName: task.displayName,
           torrentPath: stableTorrentPath,
+          selectedTorrentFileIndexes: task.selectedTorrentFileIndexes,
           saveDir: task.saveDir,
         );
       } else if (task.originalUri != null && task.originalUri!.isNotEmpty) {
@@ -475,8 +480,15 @@ class Aria2DownloadController extends ChangeNotifier {
   Future<String> _addTorrentWithFallback({
     required String torrentPath,
     required String saveDir,
+    List<int>? selectedFileIndexes,
     bool strictResume = false,
   }) async {
+    final validIndexes =
+        selectedFileIndexes == null
+              ? <int>[]
+              : selectedFileIndexes.where((index) => index > 0).toList()
+          ..sort();
+
     final btOptions = <String, String>{
       'dir': saveDir,
       'bt-tracker': kBtTrackers.join(','),
@@ -486,6 +498,7 @@ class Aria2DownloadController extends ChangeNotifier {
       'continue': 'true',
       'allow-overwrite': 'true',
       'auto-file-renaming': strictResume ? 'false' : 'true',
+      if (validIndexes.isNotEmpty) 'select-file': validIndexes.join(','),
     };
 
     try {
@@ -494,6 +507,44 @@ class Aria2DownloadController extends ChangeNotifier {
       final gid = await _aria2.addTorrent(torrentPath);
       await _aria2.changeOption(gid, btOptions);
       return gid;
+    }
+  }
+
+  Future<List<TorrentTaskFile>> loadTorrentFiles(String torrentPath) async {
+    if (!isReady) {
+      throw Exception('aria2 尚未准备完成');
+    }
+
+    final sourceFile = File(torrentPath);
+    if (!sourceFile.existsSync()) {
+      throw Exception('种子文件不存在');
+    }
+
+    final stableTorrentPath = await _ensureStableTorrentFile(torrentPath);
+
+    String? gid;
+    try {
+      gid = await _aria2.addTorrent(
+        stableTorrentPath,
+        options: {'pause': 'true', 'follow-torrent': 'true'},
+      );
+
+      final files = await _aria2.getDownloadFiles(gid);
+      return files
+          .map(
+            (file) => TorrentTaskFile(
+              index: file.index,
+              path: file.path,
+              length: file.length,
+            ),
+          )
+          .toList();
+    } finally {
+      if (gid != null) {
+        try {
+          await _aria2.removeDownload(gid, force: true);
+        } catch (_) {}
+      }
     }
   }
 

@@ -4,15 +4,19 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../models/add_download_request.dart';
+import '../models/torrent_task_file.dart';
 
 enum AddDownloadPresentation { dialog, sheet }
 
 class AddDownloadDialog extends StatefulWidget {
   const AddDownloadDialog({
     super.key,
+    required this.onLoadTorrentFiles,
     this.presentation = AddDownloadPresentation.dialog,
   });
 
+  final Future<List<TorrentTaskFile>> Function(String torrentPath)
+  onLoadTorrentFiles;
   final AddDownloadPresentation presentation;
 
   @override
@@ -22,9 +26,15 @@ class AddDownloadDialog extends StatefulWidget {
 class _AddDownloadDialogState extends State<AddDownloadDialog> {
   final TextEditingController _urlController = TextEditingController();
   final TextEditingController _saveDirController = TextEditingController();
+  final ScrollController _fileListVerticalController = ScrollController();
+  final ScrollController _fileListHorizontalController = ScrollController();
 
   String? _torrentPath;
   String? _torrentName;
+  bool _loadingTorrentFiles = false;
+  List<TorrentTaskFile> _torrentFiles = [];
+  List<String> _torrentDisplayPaths = [];
+  final Set<int> _selectedFileIndexes = <int>{};
 
   @override
   void initState() {
@@ -37,6 +47,8 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
   void dispose() {
     _urlController.dispose();
     _saveDirController.dispose();
+    _fileListVerticalController.dispose();
+    _fileListHorizontalController.dispose();
     super.dispose();
   }
 
@@ -56,7 +68,35 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
       _torrentPath = selectedPath;
       _torrentName = result.files.single.name;
       _urlController.clear();
+      _loadingTorrentFiles = true;
+      _torrentFiles = [];
+      _torrentDisplayPaths = [];
+      _selectedFileIndexes.clear();
     });
+
+    try {
+      final files = await widget.onLoadTorrentFiles(selectedPath);
+      if (!mounted) return;
+      setState(() {
+        _torrentFiles = files;
+        _torrentDisplayPaths = _buildDisplayPaths(files);
+        _selectedFileIndexes.addAll(files.map((file) => file.index));
+      });
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('读取种子文件列表失败: $error');
+      setState(() {
+        _torrentPath = null;
+        _torrentName = null;
+        _torrentDisplayPaths = [];
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingTorrentFiles = false;
+        });
+      }
+    }
   }
 
   Future<void> _pickSaveDirectory() async {
@@ -87,11 +127,21 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
       return;
     }
 
+    if (hasTorrent &&
+        _torrentFiles.isNotEmpty &&
+        _selectedFileIndexes.isEmpty) {
+      _showMessage('请至少选择一个种子文件');
+      return;
+    }
+
     Navigator.of(context).pop(
       AddDownloadRequest(
         url: hasUrl ? url : null,
         torrentPath: hasTorrent ? _torrentPath : null,
         torrentName: _torrentName,
+        selectedTorrentFileIndexes: hasTorrent
+            ? (_selectedFileIndexes.toList()..sort())
+            : null,
         saveDir: saveDir,
       ),
     );
@@ -195,6 +245,9 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
                   setState(() {
                     _torrentPath = null;
                     _torrentName = null;
+                    _torrentFiles = [];
+                    _torrentDisplayPaths = [];
+                    _selectedFileIndexes.clear();
                   });
                 },
                 icon: const Icon(Icons.close),
@@ -202,6 +255,112 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
             ],
           ],
         ),
+        if (_loadingTorrentFiles)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 8),
+                Text('正在读取种子文件列表...'),
+              ],
+            ),
+          ),
+        if (!_loadingTorrentFiles && _torrentFiles.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Text('种子文件选择'),
+              const Spacer(),
+              TextButton(
+                onPressed: () {
+                  setState(() {
+                    _selectedFileIndexes.clear();
+                    _selectedFileIndexes.addAll(
+                      _torrentFiles.map((file) => file.index),
+                    );
+                  });
+                },
+                child: const Text('全选'),
+              ),
+              TextButton(
+                onPressed: () {
+                  setState(_selectedFileIndexes.clear);
+                },
+                child: const Text('清空'),
+              ),
+            ],
+          ),
+          Container(
+            constraints: const BoxConstraints(maxHeight: 220),
+            decoration: BoxDecoration(
+              border: Border.all(color: Theme.of(context).dividerColor),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final minWidth = constraints.maxWidth;
+                final estimatedWidth = _estimateFileListContentWidth();
+                final contentWidth = estimatedWidth > minWidth
+                    ? estimatedWidth
+                    : minWidth;
+
+                return Scrollbar(
+                  controller: _fileListHorizontalController,
+                  thumbVisibility: true,
+                  notificationPredicate: (notification) =>
+                      notification.metrics.axis == Axis.horizontal,
+                  child: SingleChildScrollView(
+                    controller: _fileListHorizontalController,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: contentWidth,
+                      child: Scrollbar(
+                        controller: _fileListVerticalController,
+                        thumbVisibility: true,
+                        child: ListView.builder(
+                          controller: _fileListVerticalController,
+                          shrinkWrap: true,
+                          itemCount: _torrentFiles.length,
+                          itemBuilder: (context, index) {
+                            final file = _torrentFiles[index];
+                            final selected = _selectedFileIndexes.contains(
+                              file.index,
+                            );
+                            final displayPath =
+                                index < _torrentDisplayPaths.length
+                                ? _torrentDisplayPaths[index]
+                                : _fileNameOnly(file.path);
+                            return CheckboxListTile(
+                              value: selected,
+                              dense: true,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              onChanged: (value) {
+                                setState(() {
+                                  if (value == true) {
+                                    _selectedFileIndexes.add(file.index);
+                                  } else {
+                                    _selectedFileIndexes.remove(file.index);
+                                  }
+                                });
+                              },
+                              title: Text(displayPath, maxLines: 1),
+                              subtitle: Text(_formatSize(file.length)),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
         const SizedBox(height: 12),
         Row(
           children: [
@@ -223,5 +382,80 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
         ),
       ],
     );
+  }
+
+  String _formatSize(int bytes) {
+    if (bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var unitIndex = 0;
+    var size = bytes.toDouble();
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+    return '${size.toStringAsFixed(unitIndex == 0 ? 0 : 1)} ${units[unitIndex]}';
+  }
+
+  double _estimateFileListContentWidth() {
+    var maxLength = 0;
+    for (final path in _torrentDisplayPaths) {
+      if (path.length > maxLength) {
+        maxLength = path.length;
+      }
+    }
+
+    const basePaddingWidth = 260.0;
+    final textWidth = maxLength * 8.2;
+    return basePaddingWidth + textWidth;
+  }
+
+  List<String> _buildDisplayPaths(List<TorrentTaskFile> files) {
+    if (files.isEmpty) return const [];
+
+    final normalized = files.map((file) => _normalizePath(file.path)).toList();
+    if (normalized.length == 1) {
+      return [_fileNameOnly(normalized.first)];
+    }
+
+    final commonPrefix = _commonPathPrefix(normalized);
+    return normalized.map((path) {
+      var value = path;
+      if (commonPrefix.isNotEmpty && value.startsWith(commonPrefix)) {
+        value = value.substring(commonPrefix.length);
+      }
+      if (value.startsWith('/')) {
+        value = value.substring(1);
+      }
+      if (value.isEmpty) {
+        return _fileNameOnly(path);
+      }
+      return value;
+    }).toList();
+  }
+
+  String _commonPathPrefix(List<String> paths) {
+    if (paths.isEmpty) return '';
+    var prefix = paths.first;
+    for (final path in paths.skip(1)) {
+      var i = 0;
+      final max = prefix.length < path.length ? prefix.length : path.length;
+      while (i < max && prefix.codeUnitAt(i) == path.codeUnitAt(i)) {
+        i++;
+      }
+      prefix = prefix.substring(0, i);
+      if (prefix.isEmpty) break;
+    }
+
+    final lastSlash = prefix.lastIndexOf('/');
+    if (lastSlash <= 0) return '';
+    return prefix.substring(0, lastSlash + 1);
+  }
+
+  String _normalizePath(String path) => path.replaceAll('\\', '/');
+
+  String _fileNameOnly(String path) {
+    final normalized = _normalizePath(path);
+    final parts = normalized.split('/');
+    return parts.isEmpty ? normalized : parts.last;
   }
 }

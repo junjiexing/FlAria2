@@ -42,15 +42,19 @@ class _HomePageState extends State<HomePage> {
         context: context,
         isScrollControlled: true,
         useSafeArea: true,
-        builder: (_) => const FractionallySizedBox(
+        builder: (_) => FractionallySizedBox(
           heightFactor: 1,
-          child: AddDownloadDialog(presentation: AddDownloadPresentation.sheet),
+          child: AddDownloadDialog(
+            presentation: AddDownloadPresentation.sheet,
+            onLoadTorrentFiles: _controller.loadTorrentFiles,
+          ),
         ),
       );
     } else {
       request = await showDialog<AddDownloadRequest>(
         context: context,
-        builder: (_) => const AddDownloadDialog(),
+        builder: (_) =>
+            AddDownloadDialog(onLoadTorrentFiles: _controller.loadTorrentFiles),
       );
     }
 
