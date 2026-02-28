@@ -47,14 +47,17 @@ class _HomePageState extends State<HomePage> {
           child: AddDownloadDialog(
             presentation: AddDownloadPresentation.sheet,
             onLoadTorrentFiles: _controller.loadTorrentFiles,
+            onLoadMagnetFiles: _controller.loadMagnetFiles,
           ),
         ),
       );
     } else {
       request = await showDialog<AddDownloadRequest>(
         context: context,
-        builder: (_) =>
-            AddDownloadDialog(onLoadTorrentFiles: _controller.loadTorrentFiles),
+        builder: (_) => AddDownloadDialog(
+          onLoadTorrentFiles: _controller.loadTorrentFiles,
+          onLoadMagnetFiles: _controller.loadMagnetFiles,
+        ),
       );
     }
 

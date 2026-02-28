@@ -12,11 +12,14 @@ class AddDownloadDialog extends StatefulWidget {
   const AddDownloadDialog({
     super.key,
     required this.onLoadTorrentFiles,
+    required this.onLoadMagnetFiles,
     this.presentation = AddDownloadPresentation.dialog,
   });
 
   final Future<List<TorrentTaskFile>> Function(String torrentPath)
   onLoadTorrentFiles;
+  final Future<List<TorrentTaskFile>> Function(String magnetUrl)
+  onLoadMagnetFiles;
   final AddDownloadPresentation presentation;
 
   @override
@@ -110,12 +113,49 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
     });
   }
 
+  Future<void> _loadMagnetFiles() async {
+    final magnet = _urlController.text.trim();
+    if (!_isMagnetUrl(magnet)) {
+      _showMessage('请输入有效的磁力链接');
+      return;
+    }
+
+    setState(() {
+      _loadingTorrentFiles = true;
+      _torrentPath = null;
+      _torrentName = null;
+      _torrentFiles = [];
+      _torrentDisplayPaths = [];
+      _selectedFileIndexes.clear();
+    });
+
+    try {
+      final files = await widget.onLoadMagnetFiles(magnet);
+      if (!mounted) return;
+      setState(() {
+        _torrentFiles = files;
+        _torrentDisplayPaths = _buildDisplayPaths(files);
+        _selectedFileIndexes.addAll(files.map((file) => file.index));
+      });
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage('读取磁力文件列表失败: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingTorrentFiles = false;
+        });
+      }
+    }
+  }
+
   void _submit() {
     final url = _urlController.text.trim();
     final saveDir = _saveDirController.text.trim();
 
     final hasUrl = url.isNotEmpty;
     final hasTorrent = _torrentPath != null && _torrentPath!.isNotEmpty;
+    final isMagnet = _isMagnetUrl(url);
 
     if (!hasUrl && !hasTorrent) {
       _showMessage('请输入下载链接或选择种子文件');
@@ -127,7 +167,7 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
       return;
     }
 
-    if (hasTorrent &&
+    if ((hasTorrent || isMagnet) &&
         _torrentFiles.isNotEmpty &&
         _selectedFileIndexes.isEmpty) {
       _showMessage('请至少选择一个种子文件');
@@ -139,7 +179,7 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
         url: hasUrl ? url : null,
         torrentPath: hasTorrent ? _torrentPath : null,
         torrentName: _torrentName,
-        selectedTorrentFileIndexes: hasTorrent
+        selectedTorrentFileIndexes: (hasTorrent || isMagnet)
             ? (_selectedFileIndexes.toList()..sort())
             : null,
         saveDir: saveDir,
@@ -216,12 +256,34 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
         TextField(
           controller: _urlController,
           enabled: _torrentPath == null,
+          onChanged: (_) {
+            if (_torrentPath == null) {
+              setState(() {
+                _torrentFiles = [];
+                _torrentDisplayPaths = [];
+                _selectedFileIndexes.clear();
+              });
+            }
+          },
           decoration: const InputDecoration(
             labelText: '下载链接',
             hintText: 'HTTP/HTTPS/FTP/Magnet',
             border: OutlineInputBorder(),
           ),
         ),
+        if (_torrentPath == null) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Spacer(),
+              OutlinedButton.icon(
+                onPressed: _loadMagnetFiles,
+                icon: const Icon(Icons.list_alt, size: 18),
+                label: const Text('读取磁力文件列表'),
+              ),
+            ],
+          ),
+        ],
         const SizedBox(height: 8),
         Row(
           children: [
@@ -457,5 +519,9 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
     final normalized = _normalizePath(path);
     final parts = normalized.split('/');
     return parts.isEmpty ? normalized : parts.last;
+  }
+
+  bool _isMagnetUrl(String value) {
+    return value.toLowerCase().startsWith('magnet:?');
   }
 }
