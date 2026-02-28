@@ -5,15 +5,17 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:fl_aria2/main.dart';
+import 'package:fl_aria2/app.dart';
 
 void main() {
   testWidgets('Downloader page renders', (WidgetTester tester) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(const DownloaderApp());
 
-    expect(find.text('Flutter Aria2 下载管理器'), findsOneWidget);
-    expect(find.text('引擎控制'), findsOneWidget);
+    expect(find.text('下载任务'), findsOneWidget);
+    expect(find.byIcon(Icons.add), findsOneWidget);
+    expect(find.byIcon(Icons.settings), findsOneWidget);
   });
 }
