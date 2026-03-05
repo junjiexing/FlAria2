@@ -36,9 +36,10 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _openAddDialog() async {
     final isMobileWidth = MediaQuery.of(context).size.width < 700;
-    AddDownloadRequest? request;
+    AddDownloadPreparedRequest? preparedRequest;
+
     if (isMobileWidth) {
-      request = await showModalBottomSheet<AddDownloadRequest>(
+      preparedRequest = await showModalBottomSheet<AddDownloadPreparedRequest>(
         context: context,
         isScrollControlled: true,
         useSafeArea: true,
@@ -52,11 +53,36 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     } else {
-      request = await showDialog<AddDownloadRequest>(
+      preparedRequest = await showDialog<AddDownloadPreparedRequest>(
         context: context,
         builder: (_) => AddDownloadDialog(
           onLoadTorrentFiles: _controller.loadTorrentFiles,
           onLoadMagnetFiles: _controller.loadMagnetFiles,
+        ),
+      );
+    }
+
+    if (!mounted || preparedRequest == null) return;
+
+    AddDownloadRequest? request;
+    if (isMobileWidth) {
+      request = await showModalBottomSheet<AddDownloadRequest>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (_) => FractionallySizedBox(
+          heightFactor: 1,
+          child: AddDownloadConfirmDialog(
+            presentation: AddDownloadPresentation.sheet,
+            preparedRequest: preparedRequest!,
+          ),
+        ),
+      );
+    } else {
+      request = await showDialog<AddDownloadRequest>(
+        context: context,
+        builder: (_) => AddDownloadConfirmDialog(
+          preparedRequest: preparedRequest!,
         ),
       );
     }
