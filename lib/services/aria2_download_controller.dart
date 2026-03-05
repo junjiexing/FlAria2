@@ -572,6 +572,167 @@ class Aria2DownloadController extends ChangeNotifier {
     }
   }
 
+  Future<({Aria2BtMetaInfoData btMetaInfo, List<Aria2FileData> files})>
+  loadTorrentBtMetaInfoAndFiles(String torrentPath) async {
+    if (!isReady) {
+      throw Exception('aria2 尚未准备完成');
+    }
+
+    final sourceFile = File(torrentPath);
+    if (!sourceFile.existsSync()) {
+      throw Exception('种子文件不存在');
+    }
+
+    final stableTorrentPath = await _ensureStableTorrentFile(torrentPath);
+    final cacheDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}FlAria2Cache',
+    );
+    if (!cacheDir.existsSync()) {
+      cacheDir.createSync(recursive: true);
+    }
+
+    String? gid;
+    try {
+      gid = await _aria2.addTorrent(
+        stableTorrentPath,
+        options: {'pause': 'true', 'dir': cacheDir.path},
+      );
+
+      final btMetaInfo = await _aria2.getDownloadBtMetaInfo(gid);
+      final files = await _aria2.getDownloadFiles(gid);
+      final normalizedFiles = files
+          .map((file) {
+            final normalizedFilePath = file.path.replaceAll('\\', '/');
+            final normalizedDirPath = cacheDir.path.replaceAll('\\', '/');
+            final dirPrefix = '$normalizedDirPath/';
+
+            var relativePath = normalizedFilePath;
+            if (normalizedFilePath == normalizedDirPath) {
+              relativePath = '';
+            } else if (normalizedFilePath.startsWith(dirPrefix)) {
+              relativePath = normalizedFilePath.substring(dirPrefix.length);
+            }
+
+            return Aria2FileData(
+              index: file.index,
+              path: relativePath,
+              length: file.length,
+              completedLength: file.completedLength,
+              selected: file.selected,
+              uris: file.uris,
+            );
+          })
+          .toList(growable: false);
+      return (btMetaInfo: btMetaInfo, files: normalizedFiles);
+    } finally {
+      if (gid != null) {
+        try {
+          await _aria2.removeDownload(gid, force: true);
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<({Aria2BtMetaInfoData btMetaInfo, List<Aria2FileData> files})>
+  loadMagnetBtMetaInfoAndFiles(String magnetUrl) async {
+    if (!isReady) {
+      throw Exception('aria2 尚未准备完成');
+    }
+
+    if (!_isMagnetUrl(magnetUrl)) {
+      throw Exception('请输入有效的磁力链接');
+    }
+
+    final cacheDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}FlAria2Cache',
+    );
+    if (!cacheDir.existsSync()) {
+      cacheDir.createSync(recursive: true);
+    }
+
+    String? gid;
+    try {
+      gid = await _aria2.addUri(
+        [magnetUrl],
+        options: {
+          'dir': cacheDir.path,
+          'bt-save-metadata': 'true',
+          'bt-metadata-only': 'true',
+          'follow-torrent': 'false',
+          'allow-overwrite': 'true',
+          'auto-file-renaming': 'true',
+        },
+      );
+
+      final info = await _waitUntilDownloadFinished(gid);
+      if (info.status != Aria2DownloadStatus.complete) {
+        throw Exception('磁力元数据下载失败，状态: ${info.status}，错误码: ${info.errorCode}');
+      }
+
+      final files = await _aria2.getDownloadFiles(gid);
+      final torrentPath = _extractTorrentFilePath(files);
+      if (torrentPath == null || torrentPath.isEmpty) {
+        throw Exception('未找到下载后的种子文件');
+      }
+
+      return loadTorrentBtMetaInfoAndFiles(torrentPath);
+    } finally {
+      if (gid != null) {
+        try {
+          await _aria2.removeDownload(gid, force: true);
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<Aria2DownloadInfo> _waitUntilDownloadFinished(
+    String gid, {
+    Duration timeout = const Duration(seconds: 60),
+    Duration pollInterval = const Duration(milliseconds: 500),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    Aria2DownloadInfo? lastInfo;
+
+    while (DateTime.now().isBefore(deadline)) {
+      final info = await _aria2.getDownloadInfo(gid);
+      lastInfo = info;
+
+      if (info.status == Aria2DownloadStatus.complete ||
+          info.status == Aria2DownloadStatus.error ||
+          info.status == Aria2DownloadStatus.removed) {
+        return info;
+      }
+
+      await Future.delayed(pollInterval);
+    }
+
+    throw Exception(
+      '等待任务完成超时: gid=$gid, status=${lastInfo?.status}, errorCode=${lastInfo?.errorCode}',
+    );
+  }
+
+  String? _extractTorrentFilePath(List<Aria2FileData> files) {
+    for (final file in files) {
+      final path = file.path.trim();
+      if (path.isEmpty) {
+        continue;
+      }
+
+      if (path.toLowerCase().endsWith('.torrent')) {
+        return path;
+      }
+    }
+
+    for (final file in files) {
+      final path = file.path.trim();
+      if (path.isNotEmpty) {
+        return path;
+      }
+    }
+
+    return null;
+  }
+
   Future<List<TorrentTaskFile>> loadMagnetFiles(String magnetUrl) async {
     if (!isReady) {
       throw Exception('aria2 尚未准备完成');
