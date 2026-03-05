@@ -130,10 +130,10 @@ packages:
     dependency: "direct main"
     description:
       name: flutter_aria2
-      sha256: "85410ea8f8120e9d964a8a7c1e7cd27a7f05fc8d8a90e85f7a1f10370c3332cf"
+      sha256: b97619063814860277d3626dd0424b5d23f5e24e15591a6bd83d94f504341f80
       url: "https://pub.dev"
     source: hosted
-    version: "0.1.2"
+    version: "0.1.3"
   flutter_lints:
     dependency: "direct dev"
     description:
