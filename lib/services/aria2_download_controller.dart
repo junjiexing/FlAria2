@@ -535,41 +535,8 @@ class Aria2DownloadController extends ChangeNotifier {
   }
 
   Future<List<TorrentTaskFile>> loadTorrentFiles(String torrentPath) async {
-    if (!isReady) {
-      throw Exception('aria2 尚未准备完成');
-    }
-
-    final sourceFile = File(torrentPath);
-    if (!sourceFile.existsSync()) {
-      throw Exception('种子文件不存在');
-    }
-
-    final stableTorrentPath = await _ensureStableTorrentFile(torrentPath);
-
-    String? gid;
-    try {
-      gid = await _aria2.addTorrent(
-        stableTorrentPath,
-        options: {'pause': 'true', 'follow-torrent': 'true'},
-      );
-
-      final files = await _aria2.getDownloadFiles(gid);
-      return files
-          .map(
-            (file) => TorrentTaskFile(
-              index: file.index,
-              path: file.path,
-              length: file.length,
-            ),
-          )
-          .toList();
-    } finally {
-      if (gid != null) {
-        try {
-          await _aria2.removeDownload(gid, force: true);
-        } catch (_) {}
-      }
-    }
+    final result = await loadTorrentBtMetaInfoAndFiles(torrentPath);
+    return _toTorrentTaskFiles(result.files);
   }
 
   Future<({Aria2BtMetaInfoData btMetaInfo, List<Aria2FileData> files})>
@@ -668,12 +635,7 @@ class Aria2DownloadController extends ChangeNotifier {
       if (info.status != Aria2DownloadStatus.complete) {
         throw Exception('磁力元数据下载失败，状态: ${info.status}，错误码: ${info.errorCode}');
       }
-
-      final files = await _aria2.getDownloadFiles(gid);
-      final torrentPath = _extractTorrentFilePath(files);
-      if (torrentPath == null || torrentPath.isEmpty) {
-        throw Exception('未找到下载后的种子文件');
-      }
+      final torrentPath = '${cacheDir.path}${Platform.pathSeparator}${info.infoHash}.torrent';
 
       return loadTorrentBtMetaInfoAndFiles(torrentPath);
     } finally {
@@ -711,190 +673,21 @@ class Aria2DownloadController extends ChangeNotifier {
     );
   }
 
-  String? _extractTorrentFilePath(List<Aria2FileData> files) {
-    for (final file in files) {
-      final path = file.path.trim();
-      if (path.isEmpty) {
-        continue;
-      }
-
-      if (path.toLowerCase().endsWith('.torrent')) {
-        return path;
-      }
-    }
-
-    for (final file in files) {
-      final path = file.path.trim();
-      if (path.isNotEmpty) {
-        return path;
-      }
-    }
-
-    return null;
-  }
-
   Future<List<TorrentTaskFile>> loadMagnetFiles(String magnetUrl) async {
-    if (!isReady) {
-      throw Exception('aria2 尚未准备完成');
-    }
-
-    if (!_isMagnetUrl(magnetUrl)) {
-      throw Exception('请输入有效的磁力链接');
-    }
-
-    DownloadTask? existingTask;
-    for (final task in _tasks) {
-      if (task.originalUri == magnetUrl) {
-        existingTask = task;
-        break;
-      }
-    }
-
-    if (existingTask != null) {
-      try {
-        final files = await _loadRealMagnetFilesFromGid(
-          existingTask.gid,
-          maxAttempts: 8,
-        );
-        if (files.isNotEmpty) {
-          return files;
-        }
-      } catch (_) {}
-    }
-
-    await _ensurePersistencePaths();
-    final appSupportDir = await getApplicationSupportDirectory();
-    final previewDir = Directory(
-      '${appSupportDir.path}${Platform.pathSeparator}magnet_preview',
-    );
-    if (!previewDir.existsSync()) {
-      previewDir.createSync(recursive: true);
-    }
-
-    String? metadataGid;
-    String? payloadGid;
-    try {
-      metadataGid = await _aria2.addUri(
-        [magnetUrl],
-        options: {
-          'dir': previewDir.path,
-          'follow-torrent': 'true',
-          'allow-overwrite': 'true',
-          'auto-file-renaming': 'true',
-        },
-      );
-
-      for (var i = 0; i < 45; i++) {
-        final resolved = await _resolveMagnetPayloadGid(metadataGid);
-        if (resolved != null && resolved.isNotEmpty) {
-          payloadGid = resolved;
-        }
-
-        payloadGid ??= await _discoverPayloadGidByDir(previewDir.path);
-
-        final queryGid = payloadGid ?? metadataGid;
-        final files = await _loadRealMagnetFilesFromGid(
-          queryGid,
-          maxAttempts: 1,
-        );
-        if (files.isNotEmpty) {
-          return files;
-        }
-
-        await Future.delayed(const Duration(seconds: 1));
-      }
-
-      throw Exception('获取磁力文件列表超时，请稍后重试');
-    } finally {
-      if (payloadGid != null) {
-        try {
-          await _aria2.removeDownload(payloadGid, force: true);
-        } catch (_) {}
-      }
-
-      if (metadataGid != null) {
-        try {
-          await _aria2.removeDownload(metadataGid, force: true);
-        } catch (_) {}
-      }
-    }
+    final result = await loadMagnetBtMetaInfoAndFiles(magnetUrl);
+    return _toTorrentTaskFiles(result.files);
   }
 
-  Future<String?> _resolveMagnetPayloadGid(String gid) async {
-    try {
-      final info = await _aria2.getDownloadInfo(gid);
-      if (info.followedBy.isNotEmpty) {
-        return info.followedBy.first;
-      }
-      if (info.following.isNotEmpty) {
-        return info.following;
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  Future<List<TorrentTaskFile>> _loadRealMagnetFilesFromGid(
-    String gid, {
-    required int maxAttempts,
-  }) async {
-    for (var i = 0; i < maxAttempts; i++) {
-      try {
-        final files = await _aria2.getDownloadFiles(gid);
-        if (_hasRealMagnetFiles(files)) {
-          return files
-              .map(
-                (file) => TorrentTaskFile(
-                  index: file.index,
-                  path: file.path,
-                  length: file.length,
-                ),
-              )
-              .toList();
-        }
-      } catch (_) {
-        // GID 在 metadata -> payload 切换窗口可能暂时无效，继续轮询即可。
-      }
-
-      if (i < maxAttempts - 1) {
-        await Future.delayed(const Duration(milliseconds: 250));
-      }
-    }
-
-    return const [];
-  }
-
-  Future<String?> _discoverPayloadGidByDir(String previewDirPath) async {
-    try {
-      final gids = await _aria2.getActiveDownload();
-      for (final gid in gids) {
-        try {
-          final info = await _aria2.getDownloadInfo(gid);
-          if (info.dir != previewDirPath) {
-            continue;
-          }
-
-          final files = await _aria2.getDownloadFiles(gid);
-          if (_hasRealMagnetFiles(files)) {
-            return gid;
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
-
-    return null;
-  }
-
-  bool _hasRealMagnetFiles(List<Aria2FileData> files) {
-    if (files.isEmpty) return false;
-
-    return files.any((file) {
-      final path = file.path.trim();
-      if (path.isEmpty) return false;
-
-      final lower = path.toLowerCase();
-      if (lower.contains('[metadata]')) return false;
-      return true;
-    });
+  List<TorrentTaskFile> _toTorrentTaskFiles(List<Aria2FileData> files) {
+    return files
+        .map(
+          (file) => TorrentTaskFile(
+            index: file.index,
+            path: file.path,
+            length: file.length,
+          ),
+        )
+        .toList(growable: false);
   }
 
   bool _isMagnetUrl(String url) {
