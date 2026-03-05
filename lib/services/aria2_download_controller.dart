@@ -199,6 +199,7 @@ class Aria2DownloadController extends ChangeNotifier {
     }
 
     try {
+      final preferredTaskName = request.taskName.trim();
       if (request.isTorrent) {
         final stableTorrentPath = await _ensureStableTorrentFile(
           request.torrentPath!,
@@ -208,12 +209,15 @@ class Aria2DownloadController extends ChangeNotifier {
           saveDir: saveDir,
           selectedFileIndexes: request.selectedTorrentFileIndexes,
         );
-        final name = request.torrentName ?? 'Torrent 任务';
+        final name = preferredTaskName.isNotEmpty
+            ? preferredTaskName
+            : (request.torrentName ?? 'Torrent 任务');
         _tasks.add(
           DownloadTask(
             gid: gid,
-            displayName: '[Torrent] $name',
+            displayName: name,
             torrentPath: stableTorrentPath,
+            originalUri: request.url,
             selectedTorrentFileIndexes: request.selectedTorrentFileIndexes,
             saveDir: saveDir,
           ),
@@ -241,10 +245,13 @@ class Aria2DownloadController extends ChangeNotifier {
             selectedFileIndexes: validIndexes,
           );
           final btName = magnetMeta.btMetaInfo.name.trim();
+          final displayName = preferredTaskName.isNotEmpty
+              ? preferredTaskName
+              : (btName.isEmpty ? 'Torrent 任务' : btName);
           _tasks.add(
             DownloadTask(
               gid: gid,
-              displayName: btName.isEmpty ? '[Torrent] $url' : '[Torrent] $btName',
+              displayName: displayName,
               torrentPath: magnetMeta.torrentPath,
               originalUri: url,
               selectedTorrentFileIndexes: validIndexes,
@@ -261,10 +268,13 @@ class Aria2DownloadController extends ChangeNotifier {
               'auto-file-renaming': 'true',
             },
           );
+          final displayName = preferredTaskName.isNotEmpty
+              ? preferredTaskName
+              : _deriveTaskNameFromUrl(url);
           _tasks.add(
             DownloadTask(
               gid: gid,
-              displayName: url,
+              displayName: displayName,
               originalUri: url,
               saveDir: saveDir,
             ),
@@ -359,7 +369,7 @@ class Aria2DownloadController extends ChangeNotifier {
         );
         newTask = DownloadTask(
           gid: gid,
-          displayName: task.originalUri!,
+          displayName: task.displayName,
           originalUri: task.originalUri,
           selectedTorrentFileIndexes: isMagnet ? validIndexes : null,
           saveDir: task.saveDir,
@@ -557,6 +567,21 @@ class Aria2DownloadController extends ChangeNotifier {
   }
 
   Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })>
+  loadTorrentMetaAndFiles(String torrentPath) async {
+    final result = await loadTorrentBtMetaInfoAndFiles(torrentPath);
+    final name = result.btMetaInfo.name.trim();
+    return (
+      torrentPath: result.torrentPath,
+      torrentName: name.isEmpty ? null : name,
+      files: _toTorrentTaskFiles(result.files),
+    );
+  }
+
+  Future<({
     Aria2BtMetaInfoData btMetaInfo,
     List<Aria2FileData> files,
     String torrentPath,
@@ -737,6 +762,24 @@ class Aria2DownloadController extends ChangeNotifier {
 
   bool _isMagnetUrl(String url) {
     return url.toLowerCase().startsWith('magnet:?');
+  }
+
+  String _deriveTaskNameFromUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return url;
+    }
+
+    final segments = uri.pathSegments.where((e) => e.trim().isNotEmpty);
+    if (segments.isNotEmpty) {
+      return Uri.decodeComponent(segments.last);
+    }
+
+    if (uri.host.isNotEmpty) {
+      return uri.host;
+    }
+
+    return url;
   }
 
   bool _isErrorCode12(Object error) {

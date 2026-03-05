@@ -10,12 +10,16 @@ enum AddDownloadPresentation { dialog, sheet }
 
 class AddDownloadPreparedRequest {
   AddDownloadPreparedRequest({
+    required this.taskName,
+    required this.sourceTypeLabel,
     this.url,
     this.torrentPath,
     this.torrentName,
     required this.torrentFiles,
   });
 
+  final String taskName;
+  final String sourceTypeLabel;
   final String? url;
   final String? torrentPath;
   final String? torrentName;
@@ -25,13 +29,17 @@ class AddDownloadPreparedRequest {
 class AddDownloadDialog extends StatefulWidget {
   const AddDownloadDialog({
     super.key,
-    required this.onLoadTorrentFiles,
+    required this.onLoadTorrentMetaAndFiles,
     required this.onLoadMagnetTorrentAndFiles,
     this.presentation = AddDownloadPresentation.dialog,
   });
 
-  final Future<List<TorrentTaskFile>> Function(String torrentPath)
-  onLoadTorrentFiles;
+  final Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })> Function(String torrentPath)
+  onLoadTorrentMetaAndFiles;
   final Future<({
     String torrentPath,
     String? torrentName,
@@ -111,20 +119,36 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
       var preparedTorrentPath = hasTorrent ? _torrentPath : null;
       var preparedTorrentName = _torrentName;
       var preparedUrl = hasUrl ? url : null;
+      var sourceTypeLabel = '普通链接';
+      var taskName = hasUrl ? _deriveTaskNameFromUrl(url) : (_torrentName ?? 'Torrent 任务');
 
       if (hasTorrent) {
-        files = await widget.onLoadTorrentFiles(_torrentPath!);
+        final torrentData = await widget.onLoadTorrentMetaAndFiles(_torrentPath!);
+        files = torrentData.files;
+        preparedTorrentPath = torrentData.torrentPath;
+        preparedTorrentName = torrentData.torrentName ?? _torrentName;
+        sourceTypeLabel = 'Torrent 文件';
+        final btName = (torrentData.torrentName ?? '').trim();
+        taskName = btName.isNotEmpty ? btName : (_torrentName ?? 'Torrent 任务');
+        preparedUrl = null;
       } else if (isMagnet) {
         final magnetData = await _loadMagnetTorrentAndFiles();
         files = magnetData.files;
         preparedTorrentPath = magnetData.torrentPath;
         preparedTorrentName = magnetData.torrentName;
         preparedUrl = null;
+        sourceTypeLabel = 'Magnet 链接';
+        final btName = (magnetData.torrentName ?? '').trim();
+        taskName = btName.isNotEmpty ? btName : 'Torrent 任务';
+      } else {
+        sourceTypeLabel = _sourceTypeLabelFromUrl(url);
       }
 
       if (!mounted) return;
       Navigator.of(context).pop(
         AddDownloadPreparedRequest(
+          taskName: taskName,
+          sourceTypeLabel: sourceTypeLabel,
           url: preparedUrl,
           torrentPath: preparedTorrentPath,
           torrentName: preparedTorrentName,
@@ -285,6 +309,39 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
   bool _isMagnetUrl(String value) {
     return value.toLowerCase().startsWith('magnet:?');
   }
+
+  String _deriveTaskNameFromUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return url;
+    }
+
+    final segments = uri.pathSegments.where((e) => e.trim().isNotEmpty);
+    if (segments.isNotEmpty) {
+      return Uri.decodeComponent(segments.last);
+    }
+
+    if (uri.host.isNotEmpty) {
+      return uri.host;
+    }
+
+    return url;
+  }
+
+  String _sourceTypeLabelFromUrl(String url) {
+    final uri = Uri.tryParse(url);
+    final scheme = (uri?.scheme ?? '').toLowerCase();
+    if (scheme == 'https') {
+      return 'HTTPS 链接';
+    }
+    if (scheme == 'http') {
+      return 'HTTP 链接';
+    }
+    if (scheme == 'ftp') {
+      return 'FTP 链接';
+    }
+    return '普通链接';
+  }
 }
 
 class AddDownloadConfirmDialog extends StatefulWidget {
@@ -304,6 +361,7 @@ class AddDownloadConfirmDialog extends StatefulWidget {
 
 class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
   final TextEditingController _saveDirController = TextEditingController();
+  final TextEditingController _taskNameController = TextEditingController();
   final ScrollController _fileListVerticalController = ScrollController();
   final ScrollController _fileListHorizontalController = ScrollController();
 
@@ -315,6 +373,7 @@ class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
     super.initState();
     _saveDirController.text =
         '${Directory.systemTemp.path}${Platform.pathSeparator}flutter_aria2_downloads';
+    _taskNameController.text = widget.preparedRequest.taskName;
     _torrentDisplayPaths = _buildDisplayPaths(widget.preparedRequest.torrentFiles);
     _selectedFileIndexes.addAll(
       widget.preparedRequest.torrentFiles.map((file) => file.index),
@@ -324,6 +383,7 @@ class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
   @override
   void dispose() {
     _saveDirController.dispose();
+    _taskNameController.dispose();
     _fileListVerticalController.dispose();
     _fileListHorizontalController.dispose();
     super.dispose();
@@ -342,6 +402,11 @@ class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
 
   void _submit() {
     final saveDir = _saveDirController.text.trim();
+    final taskName = _taskNameController.text.trim();
+    if (taskName.isEmpty) {
+      _showMessage('请输入任务名');
+      return;
+    }
     if (saveDir.isEmpty) {
       _showMessage('请选择保存目录');
       return;
@@ -355,6 +420,7 @@ class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
 
     Navigator.of(context).pop(
       AddDownloadRequest(
+        taskName: taskName,
         url: widget.preparedRequest.url,
         torrentPath: widget.preparedRequest.torrentPath,
         torrentName: widget.preparedRequest.torrentName,
@@ -442,7 +508,7 @@ class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('类型: ${_sourceTypeLabel()}'),
+              Text('类型: ${widget.preparedRequest.sourceTypeLabel}'),
               const SizedBox(height: 2),
               Text(
                 '下载源: $sourceValue',
@@ -450,6 +516,14 @@ class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
                 overflow: TextOverflow.ellipsis,
               ),
             ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _taskNameController,
+          decoration: const InputDecoration(
+            labelText: '任务名',
+            border: OutlineInputBorder(),
           ),
         ),
         if (files.isNotEmpty) ...[
@@ -638,29 +712,4 @@ class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
     return parts.isEmpty ? normalized : parts.last;
   }
 
-  String _sourceTypeLabel() {
-    if (widget.preparedRequest.torrentPath != null) {
-      return 'Torrent 文件';
-    }
-    final url = widget.preparedRequest.url ?? '';
-    if (_isMagnetUrl(url)) {
-      return 'Magnet 链接';
-    }
-    final uri = Uri.tryParse(url);
-    final scheme = (uri?.scheme ?? '').toLowerCase();
-    if (scheme == 'https') {
-      return 'HTTPS 链接';
-    }
-    if (scheme == 'http') {
-      return 'HTTP 链接';
-    }
-    if (scheme == 'ftp') {
-      return 'FTP 链接';
-    }
-    return '普通链接';
-  }
-
-  bool _isMagnetUrl(String value) {
-    return value.toLowerCase().startsWith('magnet:?');
-  }
 }

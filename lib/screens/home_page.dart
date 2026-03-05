@@ -47,7 +47,8 @@ class _HomePageState extends State<HomePage> {
           heightFactor: 1,
           child: AddDownloadDialog(
             presentation: AddDownloadPresentation.sheet,
-            onLoadTorrentFiles: _controller.loadTorrentFiles,
+            onLoadTorrentMetaAndFiles:
+                _controller.loadTorrentMetaAndFiles,
             onLoadMagnetTorrentAndFiles:
                 _controller.loadMagnetTorrentAndFiles,
           ),
@@ -57,7 +58,8 @@ class _HomePageState extends State<HomePage> {
       preparedRequest = await showDialog<AddDownloadPreparedRequest>(
         context: context,
         builder: (_) => AddDownloadDialog(
-          onLoadTorrentFiles: _controller.loadTorrentFiles,
+          onLoadTorrentMetaAndFiles:
+              _controller.loadTorrentMetaAndFiles,
           onLoadMagnetTorrentAndFiles:
               _controller.loadMagnetTorrentAndFiles,
         ),
