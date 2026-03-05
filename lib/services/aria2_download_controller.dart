@@ -93,6 +93,7 @@ class Aria2DownloadController extends ChangeNotifier {
 
       final options = <String, String>{
         'dir': defaultDir,
+        'enable-rpc': 'true',
         if (needCustomCa && caCertificatePath != null)
           'ca-certificate': caCertificatePath,
         if (needCustomCa) 'check-certificate': 'true',
@@ -198,6 +199,7 @@ class Aria2DownloadController extends ChangeNotifier {
     }
 
     try {
+      final preferredTaskName = request.taskName.trim();
       if (request.isTorrent) {
         final stableTorrentPath = await _ensureStableTorrentFile(
           request.torrentPath!,
@@ -207,12 +209,15 @@ class Aria2DownloadController extends ChangeNotifier {
           saveDir: saveDir,
           selectedFileIndexes: request.selectedTorrentFileIndexes,
         );
-        final name = request.torrentName ?? 'Torrent 任务';
+        final name = preferredTaskName.isNotEmpty
+            ? preferredTaskName
+            : (request.torrentName ?? 'Torrent 任务');
         _tasks.add(
           DownloadTask(
             gid: gid,
-            displayName: '[Torrent] $name',
+            displayName: name,
             torrentPath: stableTorrentPath,
+            originalUri: request.url,
             selectedTorrentFileIndexes: request.selectedTorrentFileIndexes,
             saveDir: saveDir,
           ),
@@ -232,27 +237,49 @@ class Aria2DownloadController extends ChangeNotifier {
                   : selectedIndexes.where((index) => index > 0).toList()
               ..sort();
 
-        final gid = await _aria2.addUri(
-          [url],
-          options: {
-            'dir': saveDir,
-            'continue': 'true',
-            'allow-overwrite': 'true',
-            'auto-file-renaming': 'true',
-            if (isMagnet) 'follow-torrent': 'true',
-            if (isMagnet && validIndexes.isNotEmpty)
-              'select-file': validIndexes.join(','),
-          },
-        );
-        _tasks.add(
-          DownloadTask(
-            gid: gid,
-            displayName: url,
-            originalUri: url,
-            selectedTorrentFileIndexes: isMagnet ? validIndexes : null,
+        if (isMagnet) {
+          final magnetMeta = await loadMagnetBtMetaInfoAndFiles(url);
+          final gid = await _addTorrentWithFallback(
+            torrentPath: magnetMeta.torrentPath,
             saveDir: saveDir,
-          ),
-        );
+            selectedFileIndexes: validIndexes,
+          );
+          final btName = magnetMeta.btMetaInfo.name.trim();
+          final displayName = preferredTaskName.isNotEmpty
+              ? preferredTaskName
+              : (btName.isEmpty ? 'Torrent 任务' : btName);
+          _tasks.add(
+            DownloadTask(
+              gid: gid,
+              displayName: displayName,
+              torrentPath: magnetMeta.torrentPath,
+              originalUri: url,
+              selectedTorrentFileIndexes: validIndexes,
+              saveDir: saveDir,
+            ),
+          );
+        } else {
+          final gid = await _aria2.addUri(
+            [url],
+            options: {
+              'dir': saveDir,
+              'continue': 'true',
+              'allow-overwrite': 'true',
+              'auto-file-renaming': 'true',
+            },
+          );
+          final displayName = preferredTaskName.isNotEmpty
+              ? preferredTaskName
+              : _deriveTaskNameFromUrl(url);
+          _tasks.add(
+            DownloadTask(
+              gid: gid,
+              displayName: displayName,
+              originalUri: url,
+              saveDir: saveDir,
+            ),
+          );
+        }
       }
 
       await _persistTasks();
@@ -342,7 +369,7 @@ class Aria2DownloadController extends ChangeNotifier {
         );
         newTask = DownloadTask(
           gid: gid,
-          displayName: task.originalUri!,
+          displayName: task.displayName,
           originalUri: task.originalUri,
           selectedTorrentFileIndexes: isMagnet ? validIndexes : null,
           saveDir: task.saveDir,
@@ -535,6 +562,31 @@ class Aria2DownloadController extends ChangeNotifier {
   }
 
   Future<List<TorrentTaskFile>> loadTorrentFiles(String torrentPath) async {
+    final result = await loadTorrentBtMetaInfoAndFiles(torrentPath);
+    return _toTorrentTaskFiles(result.files);
+  }
+
+  Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })>
+  loadTorrentMetaAndFiles(String torrentPath) async {
+    final result = await loadTorrentBtMetaInfoAndFiles(torrentPath);
+    final name = result.btMetaInfo.name.trim();
+    return (
+      torrentPath: result.torrentPath,
+      torrentName: name.isEmpty ? null : name,
+      files: _toTorrentTaskFiles(result.files),
+    );
+  }
+
+  Future<({
+    Aria2BtMetaInfoData btMetaInfo,
+    List<Aria2FileData> files,
+    String torrentPath,
+  })>
+  loadTorrentBtMetaInfoAndFiles(String torrentPath) async {
     if (!isReady) {
       throw Exception('aria2 尚未准备完成');
     }
@@ -545,24 +597,50 @@ class Aria2DownloadController extends ChangeNotifier {
     }
 
     final stableTorrentPath = await _ensureStableTorrentFile(torrentPath);
+    final cacheDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}FlAria2Cache',
+    );
+    if (!cacheDir.existsSync()) {
+      cacheDir.createSync(recursive: true);
+    }
 
     String? gid;
     try {
       gid = await _aria2.addTorrent(
         stableTorrentPath,
-        options: {'pause': 'true', 'follow-torrent': 'true'},
+        options: {'pause': 'true', 'dir': cacheDir.path},
       );
 
+      final btMetaInfo = await _aria2.getDownloadBtMetaInfo(gid);
       final files = await _aria2.getDownloadFiles(gid);
-      return files
-          .map(
-            (file) => TorrentTaskFile(
+      final normalizedFiles = files
+          .map((file) {
+            final normalizedFilePath = file.path.replaceAll('\\', '/');
+            final normalizedDirPath = cacheDir.path.replaceAll('\\', '/');
+            final dirPrefix = '$normalizedDirPath/';
+
+            var relativePath = normalizedFilePath;
+            if (normalizedFilePath == normalizedDirPath) {
+              relativePath = '';
+            } else if (normalizedFilePath.startsWith(dirPrefix)) {
+              relativePath = normalizedFilePath.substring(dirPrefix.length);
+            }
+
+            return Aria2FileData(
               index: file.index,
-              path: file.path,
+              path: relativePath,
               length: file.length,
-            ),
-          )
-          .toList();
+              completedLength: file.completedLength,
+              selected: file.selected,
+              uris: file.uris,
+            );
+          })
+          .toList(growable: false);
+      return (
+        btMetaInfo: btMetaInfo,
+        files: normalizedFiles,
+        torrentPath: stableTorrentPath,
+      );
     } finally {
       if (gid != null) {
         try {
@@ -572,7 +650,12 @@ class Aria2DownloadController extends ChangeNotifier {
     }
   }
 
-  Future<List<TorrentTaskFile>> loadMagnetFiles(String magnetUrl) async {
+  Future<({
+    Aria2BtMetaInfoData btMetaInfo,
+    List<Aria2FileData> files,
+    String torrentPath,
+  })>
+  loadMagnetBtMetaInfoAndFiles(String magnetUrl) async {
     if (!isReady) {
       throw Exception('aria2 尚未准备完成');
     }
@@ -581,163 +664,122 @@ class Aria2DownloadController extends ChangeNotifier {
       throw Exception('请输入有效的磁力链接');
     }
 
-    DownloadTask? existingTask;
-    for (final task in _tasks) {
-      if (task.originalUri == magnetUrl) {
-        existingTask = task;
-        break;
-      }
-    }
-
-    if (existingTask != null) {
-      try {
-        final files = await _loadRealMagnetFilesFromGid(
-          existingTask.gid,
-          maxAttempts: 8,
-        );
-        if (files.isNotEmpty) {
-          return files;
-        }
-      } catch (_) {}
-    }
-
-    await _ensurePersistencePaths();
-    final appSupportDir = await getApplicationSupportDirectory();
-    final previewDir = Directory(
-      '${appSupportDir.path}${Platform.pathSeparator}magnet_preview',
+    final cacheDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}FlAria2Cache',
     );
-    if (!previewDir.existsSync()) {
-      previewDir.createSync(recursive: true);
+    if (!cacheDir.existsSync()) {
+      cacheDir.createSync(recursive: true);
     }
 
-    String? metadataGid;
-    String? payloadGid;
+    String? gid;
     try {
-      metadataGid = await _aria2.addUri(
+      gid = await _aria2.addUri(
         [magnetUrl],
         options: {
-          'dir': previewDir.path,
-          'follow-torrent': 'true',
+          'dir': cacheDir.path,
+          'bt-save-metadata': 'true',
+          'bt-metadata-only': 'true',
+          'follow-torrent': 'false',
           'allow-overwrite': 'true',
-          'auto-file-renaming': 'true',
+          'file-allocation': 'none',
         },
       );
 
-      for (var i = 0; i < 45; i++) {
-        final resolved = await _resolveMagnetPayloadGid(metadataGid);
-        if (resolved != null && resolved.isNotEmpty) {
-          payloadGid = resolved;
-        }
-
-        payloadGid ??= await _discoverPayloadGidByDir(previewDir.path);
-
-        final queryGid = payloadGid ?? metadataGid;
-        final files = await _loadRealMagnetFilesFromGid(
-          queryGid,
-          maxAttempts: 1,
-        );
-        if (files.isNotEmpty) {
-          return files;
-        }
-
-        await Future.delayed(const Duration(seconds: 1));
+      final info = await _waitUntilDownloadFinished(gid);
+      if (info.status != Aria2DownloadStatus.complete) {
+        throw Exception('磁力元数据下载失败，状态: ${info.status}，错误码: ${info.errorCode}');
       }
+        final torrentPath =
+          '${cacheDir.path}${Platform.pathSeparator}${info.infoHash}.torrent';
 
-      throw Exception('获取磁力文件列表超时，请稍后重试');
+        return loadTorrentBtMetaInfoAndFiles(torrentPath);
     } finally {
-      if (payloadGid != null) {
+      if (gid != null) {
         try {
-          await _aria2.removeDownload(payloadGid, force: true);
-        } catch (_) {}
-      }
-
-      if (metadataGid != null) {
-        try {
-          await _aria2.removeDownload(metadataGid, force: true);
+          await _aria2.removeDownload(gid, force: true);
         } catch (_) {}
       }
     }
   }
 
-  Future<String?> _resolveMagnetPayloadGid(String gid) async {
-    try {
-      final info = await _aria2.getDownloadInfo(gid);
-      if (info.followedBy.isNotEmpty) {
-        return info.followedBy.first;
-      }
-      if (info.following.isNotEmpty) {
-        return info.following;
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  Future<List<TorrentTaskFile>> _loadRealMagnetFilesFromGid(
+  Future<Aria2DownloadInfo> _waitUntilDownloadFinished(
     String gid, {
-    required int maxAttempts,
+    Duration timeout = const Duration(seconds: 60),
+    Duration pollInterval = const Duration(milliseconds: 500),
   }) async {
-    for (var i = 0; i < maxAttempts; i++) {
-      try {
-        final files = await _aria2.getDownloadFiles(gid);
-        if (_hasRealMagnetFiles(files)) {
-          return files
-              .map(
-                (file) => TorrentTaskFile(
-                  index: file.index,
-                  path: file.path,
-                  length: file.length,
-                ),
-              )
-              .toList();
-        }
-      } catch (_) {
-        // GID 在 metadata -> payload 切换窗口可能暂时无效，继续轮询即可。
+    final deadline = DateTime.now().add(timeout);
+    Aria2DownloadInfo? lastInfo;
+
+    while (DateTime.now().isBefore(deadline)) {
+      final info = await _aria2.getDownloadInfo(gid);
+      lastInfo = info;
+
+      if (info.status == Aria2DownloadStatus.complete ||
+          info.status == Aria2DownloadStatus.error ||
+          info.status == Aria2DownloadStatus.removed) {
+        return info;
       }
 
-      if (i < maxAttempts - 1) {
-        await Future.delayed(const Duration(milliseconds: 250));
-      }
+      await Future.delayed(pollInterval);
     }
 
-    return const [];
+    throw Exception(
+      '等待任务完成超时: gid=$gid, status=${lastInfo?.status}, errorCode=${lastInfo?.errorCode}',
+    );
   }
 
-  Future<String?> _discoverPayloadGidByDir(String previewDirPath) async {
-    try {
-      final gids = await _aria2.getActiveDownload();
-      for (final gid in gids) {
-        try {
-          final info = await _aria2.getDownloadInfo(gid);
-          if (info.dir != previewDirPath) {
-            continue;
-          }
-
-          final files = await _aria2.getDownloadFiles(gid);
-          if (_hasRealMagnetFiles(files)) {
-            return gid;
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
-
-    return null;
+  Future<List<TorrentTaskFile>> loadMagnetFiles(String magnetUrl) async {
+    final result = await loadMagnetBtMetaInfoAndFiles(magnetUrl);
+    return _toTorrentTaskFiles(result.files);
   }
 
-  bool _hasRealMagnetFiles(List<Aria2FileData> files) {
-    if (files.isEmpty) return false;
+  Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })>
+  loadMagnetTorrentAndFiles(String magnetUrl) async {
+    final result = await loadMagnetBtMetaInfoAndFiles(magnetUrl);
+    final name = result.btMetaInfo.name.trim();
+    return (
+      torrentPath: result.torrentPath,
+      torrentName: name.isEmpty ? null : name,
+      files: _toTorrentTaskFiles(result.files),
+    );
+  }
 
-    return files.any((file) {
-      final path = file.path.trim();
-      if (path.isEmpty) return false;
-
-      final lower = path.toLowerCase();
-      if (lower.contains('[metadata]')) return false;
-      return true;
-    });
+  List<TorrentTaskFile> _toTorrentTaskFiles(List<Aria2FileData> files) {
+    return files
+        .map(
+          (file) => TorrentTaskFile(
+            index: file.index,
+            path: file.path,
+            length: file.length,
+          ),
+        )
+        .toList(growable: false);
   }
 
   bool _isMagnetUrl(String url) {
     return url.toLowerCase().startsWith('magnet:?');
+  }
+
+  String _deriveTaskNameFromUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return url;
+    }
+
+    final segments = uri.pathSegments.where((e) => e.trim().isNotEmpty);
+    if (segments.isNotEmpty) {
+      return Uri.decodeComponent(segments.last);
+    }
+
+    if (uri.host.isNotEmpty) {
+      return uri.host;
+    }
+
+    return url;
   }
 
   bool _isErrorCode12(Object error) {

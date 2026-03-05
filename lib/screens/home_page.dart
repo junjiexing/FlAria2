@@ -36,6 +36,38 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _openAddDialog() async {
     final isMobileWidth = MediaQuery.of(context).size.width < 700;
+    AddDownloadPreparedRequest? preparedRequest;
+
+    if (isMobileWidth) {
+      preparedRequest = await showModalBottomSheet<AddDownloadPreparedRequest>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (_) => FractionallySizedBox(
+          heightFactor: 1,
+          child: AddDownloadDialog(
+            presentation: AddDownloadPresentation.sheet,
+            onLoadTorrentMetaAndFiles:
+                _controller.loadTorrentMetaAndFiles,
+            onLoadMagnetTorrentAndFiles:
+                _controller.loadMagnetTorrentAndFiles,
+          ),
+        ),
+      );
+    } else {
+      preparedRequest = await showDialog<AddDownloadPreparedRequest>(
+        context: context,
+        builder: (_) => AddDownloadDialog(
+          onLoadTorrentMetaAndFiles:
+              _controller.loadTorrentMetaAndFiles,
+          onLoadMagnetTorrentAndFiles:
+              _controller.loadMagnetTorrentAndFiles,
+        ),
+      );
+    }
+
+    if (!mounted || preparedRequest == null) return;
+
     AddDownloadRequest? request;
     if (isMobileWidth) {
       request = await showModalBottomSheet<AddDownloadRequest>(
@@ -44,19 +76,17 @@ class _HomePageState extends State<HomePage> {
         useSafeArea: true,
         builder: (_) => FractionallySizedBox(
           heightFactor: 1,
-          child: AddDownloadDialog(
+          child: AddDownloadConfirmDialog(
             presentation: AddDownloadPresentation.sheet,
-            onLoadTorrentFiles: _controller.loadTorrentFiles,
-            onLoadMagnetFiles: _controller.loadMagnetFiles,
+            preparedRequest: preparedRequest!,
           ),
         ),
       );
     } else {
       request = await showDialog<AddDownloadRequest>(
         context: context,
-        builder: (_) => AddDownloadDialog(
-          onLoadTorrentFiles: _controller.loadTorrentFiles,
-          onLoadMagnetFiles: _controller.loadMagnetFiles,
+        builder: (_) => AddDownloadConfirmDialog(
+          preparedRequest: preparedRequest!,
         ),
       );
     }

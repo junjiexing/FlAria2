@@ -1,5 +1,6 @@
 class AddDownloadRequest {
   AddDownloadRequest({
+    required this.taskName,
     this.url,
     this.torrentPath,
     this.torrentName,
@@ -7,6 +8,7 @@ class AddDownloadRequest {
     required this.saveDir,
   });
 
+  final String taskName;
   final String? url;
   final String? torrentPath;
   final String? torrentName;

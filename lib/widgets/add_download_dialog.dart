@@ -8,18 +8,44 @@ import '../models/torrent_task_file.dart';
 
 enum AddDownloadPresentation { dialog, sheet }
 
+class AddDownloadPreparedRequest {
+  AddDownloadPreparedRequest({
+    required this.taskName,
+    required this.sourceTypeLabel,
+    this.url,
+    this.torrentPath,
+    this.torrentName,
+    required this.torrentFiles,
+  });
+
+  final String taskName;
+  final String sourceTypeLabel;
+  final String? url;
+  final String? torrentPath;
+  final String? torrentName;
+  final List<TorrentTaskFile> torrentFiles;
+}
+
 class AddDownloadDialog extends StatefulWidget {
   const AddDownloadDialog({
     super.key,
-    required this.onLoadTorrentFiles,
-    required this.onLoadMagnetFiles,
+    required this.onLoadTorrentMetaAndFiles,
+    required this.onLoadMagnetTorrentAndFiles,
     this.presentation = AddDownloadPresentation.dialog,
   });
 
-  final Future<List<TorrentTaskFile>> Function(String torrentPath)
-  onLoadTorrentFiles;
-  final Future<List<TorrentTaskFile>> Function(String magnetUrl)
-  onLoadMagnetFiles;
+  final Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })> Function(String torrentPath)
+  onLoadTorrentMetaAndFiles;
+  final Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })> Function(String magnetUrl)
+  onLoadMagnetTorrentAndFiles;
   final AddDownloadPresentation presentation;
 
   @override
@@ -28,30 +54,14 @@ class AddDownloadDialog extends StatefulWidget {
 
 class _AddDownloadDialogState extends State<AddDownloadDialog> {
   final TextEditingController _urlController = TextEditingController();
-  final TextEditingController _saveDirController = TextEditingController();
-  final ScrollController _fileListVerticalController = ScrollController();
-  final ScrollController _fileListHorizontalController = ScrollController();
 
   String? _torrentPath;
   String? _torrentName;
-  bool _loadingTorrentFiles = false;
-  List<TorrentTaskFile> _torrentFiles = [];
-  List<String> _torrentDisplayPaths = [];
-  final Set<int> _selectedFileIndexes = <int>{};
-
-  @override
-  void initState() {
-    super.initState();
-    _saveDirController.text =
-        '${Directory.systemTemp.path}${Platform.pathSeparator}flutter_aria2_downloads';
-  }
+  bool _loadingMetadata = false;
 
   @override
   void dispose() {
     _urlController.dispose();
-    _saveDirController.dispose();
-    _fileListVerticalController.dispose();
-    _fileListHorizontalController.dispose();
     super.dispose();
   }
 
@@ -71,87 +81,25 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
       _torrentPath = selectedPath;
       _torrentName = result.files.single.name;
       _urlController.clear();
-      _loadingTorrentFiles = true;
-      _torrentFiles = [];
-      _torrentDisplayPaths = [];
-      _selectedFileIndexes.clear();
-    });
-
-    try {
-      final files = await widget.onLoadTorrentFiles(selectedPath);
-      if (!mounted) return;
-      setState(() {
-        _torrentFiles = files;
-        _torrentDisplayPaths = _buildDisplayPaths(files);
-        _selectedFileIndexes.addAll(files.map((file) => file.index));
-      });
-    } catch (error) {
-      if (!mounted) return;
-      _showMessage('读取种子文件列表失败: $error');
-      setState(() {
-        _torrentPath = null;
-        _torrentName = null;
-        _torrentDisplayPaths = [];
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _loadingTorrentFiles = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _pickSaveDirectory() async {
-    final path = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: '选择保存目录',
-    );
-    if (path == null || path.isEmpty) return;
-
-    setState(() {
-      _saveDirController.text = path;
     });
   }
 
-  Future<void> _loadMagnetFiles() async {
+  Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })>
+  _loadMagnetTorrentAndFiles() async {
     final magnet = _urlController.text.trim();
     if (!_isMagnetUrl(magnet)) {
-      _showMessage('请输入有效的磁力链接');
-      return;
+      throw Exception('请输入有效的磁力链接');
     }
 
-    setState(() {
-      _loadingTorrentFiles = true;
-      _torrentPath = null;
-      _torrentName = null;
-      _torrentFiles = [];
-      _torrentDisplayPaths = [];
-      _selectedFileIndexes.clear();
-    });
-
-    try {
-      final files = await widget.onLoadMagnetFiles(magnet);
-      if (!mounted) return;
-      setState(() {
-        _torrentFiles = files;
-        _torrentDisplayPaths = _buildDisplayPaths(files);
-        _selectedFileIndexes.addAll(files.map((file) => file.index));
-      });
-    } catch (error) {
-      if (!mounted) return;
-      _showMessage('读取磁力文件列表失败: $error');
-    } finally {
-      if (mounted) {
-        setState(() {
-          _loadingTorrentFiles = false;
-        });
-      }
-    }
+    return widget.onLoadMagnetTorrentAndFiles(magnet);
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     final url = _urlController.text.trim();
-    final saveDir = _saveDirController.text.trim();
 
     final hasUrl = url.isNotEmpty;
     final hasTorrent = _torrentPath != null && _torrentPath!.isNotEmpty;
@@ -162,29 +110,62 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
       return;
     }
 
-    if (saveDir.isEmpty) {
-      _showMessage('请选择保存目录');
-      return;
-    }
+    setState(() {
+      _loadingMetadata = true;
+    });
 
-    if ((hasTorrent || isMagnet) &&
-        _torrentFiles.isNotEmpty &&
-        _selectedFileIndexes.isEmpty) {
-      _showMessage('请至少选择一个种子文件');
-      return;
-    }
+    try {
+      var files = <TorrentTaskFile>[];
+      var preparedTorrentPath = hasTorrent ? _torrentPath : null;
+      var preparedTorrentName = _torrentName;
+      var preparedUrl = hasUrl ? url : null;
+      var sourceTypeLabel = '普通链接';
+      var taskName = hasUrl ? _deriveTaskNameFromUrl(url) : (_torrentName ?? 'Torrent 任务');
 
-    Navigator.of(context).pop(
-      AddDownloadRequest(
-        url: hasUrl ? url : null,
-        torrentPath: hasTorrent ? _torrentPath : null,
-        torrentName: _torrentName,
-        selectedTorrentFileIndexes: (hasTorrent || isMagnet)
-            ? (_selectedFileIndexes.toList()..sort())
-            : null,
-        saveDir: saveDir,
-      ),
-    );
+      if (hasTorrent) {
+        final torrentData = await widget.onLoadTorrentMetaAndFiles(_torrentPath!);
+        files = torrentData.files;
+        preparedTorrentPath = torrentData.torrentPath;
+        preparedTorrentName = torrentData.torrentName ?? _torrentName;
+        sourceTypeLabel = 'Torrent 文件';
+        final btName = (torrentData.torrentName ?? '').trim();
+        taskName = btName.isNotEmpty ? btName : (_torrentName ?? 'Torrent 任务');
+        preparedUrl = null;
+      } else if (isMagnet) {
+        final magnetData = await _loadMagnetTorrentAndFiles();
+        files = magnetData.files;
+        preparedTorrentPath = magnetData.torrentPath;
+        preparedTorrentName = magnetData.torrentName;
+        preparedUrl = null;
+        sourceTypeLabel = 'Magnet 链接';
+        final btName = (magnetData.torrentName ?? '').trim();
+        taskName = btName.isNotEmpty ? btName : 'Torrent 任务';
+      } else {
+        sourceTypeLabel = _sourceTypeLabelFromUrl(url);
+      }
+
+      if (!mounted) return;
+      Navigator.of(context).pop(
+        AddDownloadPreparedRequest(
+          taskName: taskName,
+          sourceTypeLabel: sourceTypeLabel,
+          url: preparedUrl,
+          torrentPath: preparedTorrentPath,
+          torrentName: preparedTorrentName,
+          torrentFiles: files,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      final errorPrefix = hasTorrent ? '读取种子文件列表失败' : '读取磁力文件列表失败';
+      _showMessage('$errorPrefix: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingMetadata = false;
+        });
+      }
+    }
   }
 
   void _showMessage(String message) {
@@ -217,7 +198,10 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
                         ),
                       ),
                     ),
-                    FilledButton(onPressed: _submit, child: const Text('添加')),
+                    FilledButton(
+                      onPressed: _loadingMetadata ? null : _submit,
+                      child: const Text('确定'),
+                    ),
                   ],
                 ),
               ),
@@ -244,7 +228,10 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('取消'),
         ),
-        FilledButton(onPressed: _submit, child: const Text('添加')),
+        FilledButton(
+          onPressed: _loadingMetadata ? null : _submit,
+          child: const Text('确定'),
+        ),
       ],
     );
   }
@@ -256,34 +243,12 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
         TextField(
           controller: _urlController,
           enabled: _torrentPath == null,
-          onChanged: (_) {
-            if (_torrentPath == null) {
-              setState(() {
-                _torrentFiles = [];
-                _torrentDisplayPaths = [];
-                _selectedFileIndexes.clear();
-              });
-            }
-          },
           decoration: const InputDecoration(
             labelText: '下载链接',
             hintText: 'HTTP/HTTPS/FTP/Magnet',
             border: OutlineInputBorder(),
           ),
         ),
-        if (_torrentPath == null) ...[
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              const Spacer(),
-              OutlinedButton.icon(
-                onPressed: _loadMagnetFiles,
-                icon: const Icon(Icons.list_alt, size: 18),
-                label: const Text('读取磁力文件列表'),
-              ),
-            ],
-          ),
-        ],
         const SizedBox(height: 8),
         Row(
           children: [
@@ -307,9 +272,6 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
                   setState(() {
                     _torrentPath = null;
                     _torrentName = null;
-                    _torrentFiles = [];
-                    _torrentDisplayPaths = [];
-                    _selectedFileIndexes.clear();
                   });
                 },
                 icon: const Icon(Icons.close),
@@ -317,7 +279,7 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
             ],
           ],
         ),
-        if (_loadingTorrentFiles)
+        if (_loadingMetadata)
           const Padding(
             padding: EdgeInsets.only(top: 8),
             child: Row(
@@ -328,23 +290,253 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
                 SizedBox(width: 8),
-                Text('正在读取种子文件列表...'),
+                Text('正在加载下载元数据...'),
               ],
             ),
           ),
-        if (!_loadingTorrentFiles && _torrentFiles.isNotEmpty) ...[
+        const SizedBox(height: 6),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            '点击“确定”后会加载元数据，并进入第二步确认下载信息。',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+      ],
+    );
+  }
+
+  bool _isMagnetUrl(String value) {
+    return value.toLowerCase().startsWith('magnet:?');
+  }
+
+  String _deriveTaskNameFromUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return url;
+    }
+
+    final segments = uri.pathSegments.where((e) => e.trim().isNotEmpty);
+    if (segments.isNotEmpty) {
+      return Uri.decodeComponent(segments.last);
+    }
+
+    if (uri.host.isNotEmpty) {
+      return uri.host;
+    }
+
+    return url;
+  }
+
+  String _sourceTypeLabelFromUrl(String url) {
+    final uri = Uri.tryParse(url);
+    final scheme = (uri?.scheme ?? '').toLowerCase();
+    if (scheme == 'https') {
+      return 'HTTPS 链接';
+    }
+    if (scheme == 'http') {
+      return 'HTTP 链接';
+    }
+    if (scheme == 'ftp') {
+      return 'FTP 链接';
+    }
+    return '普通链接';
+  }
+}
+
+class AddDownloadConfirmDialog extends StatefulWidget {
+  const AddDownloadConfirmDialog({
+    super.key,
+    required this.preparedRequest,
+    this.presentation = AddDownloadPresentation.dialog,
+  });
+
+  final AddDownloadPreparedRequest preparedRequest;
+  final AddDownloadPresentation presentation;
+
+  @override
+  State<AddDownloadConfirmDialog> createState() =>
+      _AddDownloadConfirmDialogState();
+}
+
+class _AddDownloadConfirmDialogState extends State<AddDownloadConfirmDialog> {
+  final TextEditingController _saveDirController = TextEditingController();
+  final TextEditingController _taskNameController = TextEditingController();
+  final ScrollController _fileListVerticalController = ScrollController();
+  final ScrollController _fileListHorizontalController = ScrollController();
+
+  final Set<int> _selectedFileIndexes = <int>{};
+  List<String> _torrentDisplayPaths = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _saveDirController.text =
+        '${Directory.systemTemp.path}${Platform.pathSeparator}flutter_aria2_downloads';
+    _taskNameController.text = widget.preparedRequest.taskName;
+    _torrentDisplayPaths = _buildDisplayPaths(widget.preparedRequest.torrentFiles);
+    _selectedFileIndexes.addAll(
+      widget.preparedRequest.torrentFiles.map((file) => file.index),
+    );
+  }
+
+  @override
+  void dispose() {
+    _saveDirController.dispose();
+    _taskNameController.dispose();
+    _fileListVerticalController.dispose();
+    _fileListHorizontalController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickSaveDirectory() async {
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择保存目录',
+    );
+    if (path == null || path.isEmpty) return;
+
+    setState(() {
+      _saveDirController.text = path;
+    });
+  }
+
+  void _submit() {
+    final saveDir = _saveDirController.text.trim();
+    final taskName = _taskNameController.text.trim();
+    if (taskName.isEmpty) {
+      _showMessage('请输入任务名');
+      return;
+    }
+    if (saveDir.isEmpty) {
+      _showMessage('请选择保存目录');
+      return;
+    }
+
+    final files = widget.preparedRequest.torrentFiles;
+    if (files.isNotEmpty && _selectedFileIndexes.isEmpty) {
+      _showMessage('请至少选择一个种子文件');
+      return;
+    }
+
+    Navigator.of(context).pop(
+      AddDownloadRequest(
+        taskName: taskName,
+        url: widget.preparedRequest.url,
+        torrentPath: widget.preparedRequest.torrentPath,
+        torrentName: widget.preparedRequest.torrentName,
+        selectedTorrentFileIndexes: files.isEmpty
+            ? null
+            : (_selectedFileIndexes.toList()..sort()),
+        saveDir: saveDir,
+      ),
+    );
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.presentation == AddDownloadPresentation.sheet) {
+      return SafeArea(
+        child: Material(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: Row(
+                  children: [
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.close),
+                    ),
+                    const Expanded(
+                      child: Text(
+                        '确认下载信息',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    FilledButton(onPressed: _submit, child: const Text('添加')),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: _buildFormContent(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return AlertDialog(
+      title: const Text('确认下载信息'),
+      content: SingleChildScrollView(
+        child: SizedBox(width: 520, child: _buildFormContent()),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('添加')),
+      ],
+    );
+  }
+
+  Widget _buildFormContent() {
+    final files = widget.preparedRequest.torrentFiles;
+    final sourceValue = widget.preparedRequest.torrentName ??
+        widget.preparedRequest.url ??
+        '-';
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('类型: ${widget.preparedRequest.sourceTypeLabel}'),
+              const SizedBox(height: 2),
+              Text(
+                '下载源: $sourceValue',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _taskNameController,
+          decoration: const InputDecoration(
+            labelText: '任务名',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        if (files.isNotEmpty) ...[
           const SizedBox(height: 8),
           Row(
             children: [
-              const Text('种子文件选择'),
+              const Text('文件选择'),
               const Spacer(),
               TextButton(
                 onPressed: () {
                   setState(() {
                     _selectedFileIndexes.clear();
-                    _selectedFileIndexes.addAll(
-                      _torrentFiles.map((file) => file.index),
-                    );
+                    _selectedFileIndexes.addAll(files.map((file) => file.index));
                   });
                 },
                 child: const Text('全选'),
@@ -387,14 +579,13 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
                         child: ListView.builder(
                           controller: _fileListVerticalController,
                           shrinkWrap: true,
-                          itemCount: _torrentFiles.length,
+                          itemCount: files.length,
                           itemBuilder: (context, index) {
-                            final file = _torrentFiles[index];
+                            final file = files[index];
                             final selected = _selectedFileIndexes.contains(
                               file.index,
                             );
-                            final displayPath =
-                                index < _torrentDisplayPaths.length
+                            final displayPath = index < _torrentDisplayPaths.length
                                 ? _torrentDisplayPaths[index]
                                 : _fileNameOnly(file.path);
                             return CheckboxListTile(
@@ -521,7 +712,4 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
     return parts.isEmpty ? normalized : parts.last;
   }
 
-  bool _isMagnetUrl(String value) {
-    return value.toLowerCase().startsWith('magnet:?');
-  }
 }
