@@ -26,14 +26,18 @@ class AddDownloadDialog extends StatefulWidget {
   const AddDownloadDialog({
     super.key,
     required this.onLoadTorrentFiles,
-    required this.onLoadMagnetFiles,
+    required this.onLoadMagnetTorrentAndFiles,
     this.presentation = AddDownloadPresentation.dialog,
   });
 
   final Future<List<TorrentTaskFile>> Function(String torrentPath)
   onLoadTorrentFiles;
-  final Future<List<TorrentTaskFile>> Function(String magnetUrl)
-  onLoadMagnetFiles;
+  final Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })> Function(String magnetUrl)
+  onLoadMagnetTorrentAndFiles;
   final AddDownloadPresentation presentation;
 
   @override
@@ -72,13 +76,18 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
     });
   }
 
-  Future<List<TorrentTaskFile>> _loadMagnetFiles() async {
+  Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })>
+  _loadMagnetTorrentAndFiles() async {
     final magnet = _urlController.text.trim();
     if (!_isMagnetUrl(magnet)) {
       throw Exception('请输入有效的磁力链接');
     }
 
-    return widget.onLoadMagnetFiles(magnet);
+    return widget.onLoadMagnetTorrentAndFiles(magnet);
   }
 
   Future<void> _submit() async {
@@ -99,18 +108,26 @@ class _AddDownloadDialogState extends State<AddDownloadDialog> {
 
     try {
       var files = <TorrentTaskFile>[];
+      var preparedTorrentPath = hasTorrent ? _torrentPath : null;
+      var preparedTorrentName = _torrentName;
+      var preparedUrl = hasUrl ? url : null;
+
       if (hasTorrent) {
         files = await widget.onLoadTorrentFiles(_torrentPath!);
       } else if (isMagnet) {
-        files = await _loadMagnetFiles();
+        final magnetData = await _loadMagnetTorrentAndFiles();
+        files = magnetData.files;
+        preparedTorrentPath = magnetData.torrentPath;
+        preparedTorrentName = magnetData.torrentName;
+        preparedUrl = null;
       }
 
       if (!mounted) return;
       Navigator.of(context).pop(
         AddDownloadPreparedRequest(
-          url: hasUrl ? url : null,
-          torrentPath: hasTorrent ? _torrentPath : null,
-          torrentName: _torrentName,
+          url: preparedUrl,
+          torrentPath: preparedTorrentPath,
+          torrentName: preparedTorrentName,
           torrentFiles: files,
         ),
       );

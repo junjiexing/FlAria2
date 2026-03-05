@@ -93,6 +93,7 @@ class Aria2DownloadController extends ChangeNotifier {
 
       final options = <String, String>{
         'dir': defaultDir,
+        'enable-rpc': 'true',
         if (needCustomCa && caCertificatePath != null)
           'ca-certificate': caCertificatePath,
         if (needCustomCa) 'check-certificate': 'true',
@@ -232,27 +233,43 @@ class Aria2DownloadController extends ChangeNotifier {
                   : selectedIndexes.where((index) => index > 0).toList()
               ..sort();
 
-        final gid = await _aria2.addUri(
-          [url],
-          options: {
-            'dir': saveDir,
-            'continue': 'true',
-            'allow-overwrite': 'true',
-            'auto-file-renaming': 'true',
-            if (isMagnet) 'follow-torrent': 'true',
-            if (isMagnet && validIndexes.isNotEmpty)
-              'select-file': validIndexes.join(','),
-          },
-        );
-        _tasks.add(
-          DownloadTask(
-            gid: gid,
-            displayName: url,
-            originalUri: url,
-            selectedTorrentFileIndexes: isMagnet ? validIndexes : null,
+        if (isMagnet) {
+          final magnetMeta = await loadMagnetBtMetaInfoAndFiles(url);
+          final gid = await _addTorrentWithFallback(
+            torrentPath: magnetMeta.torrentPath,
             saveDir: saveDir,
-          ),
-        );
+            selectedFileIndexes: validIndexes,
+          );
+          final btName = magnetMeta.btMetaInfo.name.trim();
+          _tasks.add(
+            DownloadTask(
+              gid: gid,
+              displayName: btName.isEmpty ? '[Torrent] $url' : '[Torrent] $btName',
+              torrentPath: magnetMeta.torrentPath,
+              originalUri: url,
+              selectedTorrentFileIndexes: validIndexes,
+              saveDir: saveDir,
+            ),
+          );
+        } else {
+          final gid = await _aria2.addUri(
+            [url],
+            options: {
+              'dir': saveDir,
+              'continue': 'true',
+              'allow-overwrite': 'true',
+              'auto-file-renaming': 'true',
+            },
+          );
+          _tasks.add(
+            DownloadTask(
+              gid: gid,
+              displayName: url,
+              originalUri: url,
+              saveDir: saveDir,
+            ),
+          );
+        }
       }
 
       await _persistTasks();
@@ -539,7 +556,11 @@ class Aria2DownloadController extends ChangeNotifier {
     return _toTorrentTaskFiles(result.files);
   }
 
-  Future<({Aria2BtMetaInfoData btMetaInfo, List<Aria2FileData> files})>
+  Future<({
+    Aria2BtMetaInfoData btMetaInfo,
+    List<Aria2FileData> files,
+    String torrentPath,
+  })>
   loadTorrentBtMetaInfoAndFiles(String torrentPath) async {
     if (!isReady) {
       throw Exception('aria2 尚未准备完成');
@@ -590,7 +611,11 @@ class Aria2DownloadController extends ChangeNotifier {
             );
           })
           .toList(growable: false);
-      return (btMetaInfo: btMetaInfo, files: normalizedFiles);
+      return (
+        btMetaInfo: btMetaInfo,
+        files: normalizedFiles,
+        torrentPath: stableTorrentPath,
+      );
     } finally {
       if (gid != null) {
         try {
@@ -600,7 +625,11 @@ class Aria2DownloadController extends ChangeNotifier {
     }
   }
 
-  Future<({Aria2BtMetaInfoData btMetaInfo, List<Aria2FileData> files})>
+  Future<({
+    Aria2BtMetaInfoData btMetaInfo,
+    List<Aria2FileData> files,
+    String torrentPath,
+  })>
   loadMagnetBtMetaInfoAndFiles(String magnetUrl) async {
     if (!isReady) {
       throw Exception('aria2 尚未准备完成');
@@ -627,7 +656,7 @@ class Aria2DownloadController extends ChangeNotifier {
           'bt-metadata-only': 'true',
           'follow-torrent': 'false',
           'allow-overwrite': 'true',
-          'auto-file-renaming': 'true',
+          'file-allocation': 'none',
         },
       );
 
@@ -635,9 +664,10 @@ class Aria2DownloadController extends ChangeNotifier {
       if (info.status != Aria2DownloadStatus.complete) {
         throw Exception('磁力元数据下载失败，状态: ${info.status}，错误码: ${info.errorCode}');
       }
-      final torrentPath = '${cacheDir.path}${Platform.pathSeparator}${info.infoHash}.torrent';
+        final torrentPath =
+          '${cacheDir.path}${Platform.pathSeparator}${info.infoHash}.torrent';
 
-      return loadTorrentBtMetaInfoAndFiles(torrentPath);
+        return loadTorrentBtMetaInfoAndFiles(torrentPath);
     } finally {
       if (gid != null) {
         try {
@@ -676,6 +706,21 @@ class Aria2DownloadController extends ChangeNotifier {
   Future<List<TorrentTaskFile>> loadMagnetFiles(String magnetUrl) async {
     final result = await loadMagnetBtMetaInfoAndFiles(magnetUrl);
     return _toTorrentTaskFiles(result.files);
+  }
+
+  Future<({
+    String torrentPath,
+    String? torrentName,
+    List<TorrentTaskFile> files,
+  })>
+  loadMagnetTorrentAndFiles(String magnetUrl) async {
+    final result = await loadMagnetBtMetaInfoAndFiles(magnetUrl);
+    final name = result.btMetaInfo.name.trim();
+    return (
+      torrentPath: result.torrentPath,
+      torrentName: name.isEmpty ? null : name,
+      files: _toTorrentTaskFiles(result.files),
+    );
   }
 
   List<TorrentTaskFile> _toTorrentTaskFiles(List<Aria2FileData> files) {

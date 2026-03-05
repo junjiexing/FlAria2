@@ -48,7 +48,8 @@ class _HomePageState extends State<HomePage> {
           child: AddDownloadDialog(
             presentation: AddDownloadPresentation.sheet,
             onLoadTorrentFiles: _controller.loadTorrentFiles,
-            onLoadMagnetFiles: _controller.loadMagnetFiles,
+            onLoadMagnetTorrentAndFiles:
+                _controller.loadMagnetTorrentAndFiles,
           ),
         ),
       );
@@ -57,7 +58,8 @@ class _HomePageState extends State<HomePage> {
         context: context,
         builder: (_) => AddDownloadDialog(
           onLoadTorrentFiles: _controller.loadTorrentFiles,
-          onLoadMagnetFiles: _controller.loadMagnetFiles,
+          onLoadMagnetTorrentAndFiles:
+              _controller.loadMagnetTorrentAndFiles,
         ),
       );
     }
